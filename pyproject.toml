@@ -22,7 +22,6 @@ classifiers = [
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
-    "Typing :: Typed",
 ]
 dynamic = ["version"]
 dependencies = [
@@ -46,7 +45,6 @@ test = ["pytest>=6.0", "pytest-cov"]
 dev = [
     "black",
     "ipython",
-    "mypy",
     "pdbpp",
     "pre-commit",
     "pytest-cov",
@@ -123,21 +121,6 @@ minversion = "6.0"
 testpaths = ["tests"]
 filterwarnings = ["error"]
 
-# https://mypy.readthedocs.io/en/stable/config_file.html
-[tool.mypy]
-files = "src/**/"
-strict = true
-disallow_any_generics = false
-disallow_subclassing_any = false
-show_error_codes = true
-pretty = true
-
-# # module specific overrides
-# [[tool.mypy.overrides]]
-# module = ["numpy.*",]
-# ignore_errors = true
-
-
 # https://coverage.readthedocs.io/en/6.4/config.html
 [tool.coverage.report]
 exclude_lines = [
@@ -159,15 +142,3 @@ ignore = [
     ".ruff_cache/**/*",
     "tests/**/*",
 ]
-
-# # for things that require compilation
-# # https://cibuildwheel.readthedocs.io/en/stable/options/
-# [tool.cibuildwheel]
-# # Skip 32-bit builds & PyPy wheels on all platforms
-# skip = ["*-manylinux_i686", "*-musllinux_i686", "*-win32", "pp*"]
-# test-extras = ["test"]
-# test-command = "pytest {project}/tests -v"
-# test-skip = "*-musllinux*"
-
-# [tool.cibuildwheel.environment]
-# HATCH_BUILD_HOOKS_ENABLE = "1"
