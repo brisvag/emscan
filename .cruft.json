@@ -1,0 +1,19 @@
+{
+  "template": "https://github.com/brisvag/pyrepo-cookiecutter",
+  "commit": "c8cf95100485cbea6527621fb16838ca4f818b1a",
+  "checkout": null,
+  "context": {
+    "cookiecutter": {
+      "full_name": "Lorenzo Gaifas",
+      "email": "brisvag@gmail.com",
+      "github_username": "brisvag",
+      "project_name": "emscan",
+      "project_slug": "emscan",
+      "project_short_description": "package description.",
+      "pypi_username": "brisvag",
+      "generate_docs": false,
+      "_template": "https://github.com/brisvag/pyrepo-cookiecutter"
+    }
+  },
+  "directory": null
+}
