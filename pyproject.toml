@@ -35,6 +35,8 @@ dependencies = [
     "mrcfile",
     "sh",
     "rich",
+    "click",
+    "pydantic<2",
 ]
 
 # extras
@@ -58,8 +60,8 @@ homepage = "https://github.com/brisvag/emscan"
 repository = "https://github.com/brisvag/emscan"
 
 # same as console_scripts entry point
-# [project.scripts]
-# spam-cli = "spam:main_cli"
+[project.scripts]
+emscan = "emscan:cli"
 
 # Entry points
 # https://peps.python.org/pep-0621/#entry-points
