@@ -169,15 +169,13 @@ def correlate_rotations(img_ft, proj_fts, angle_step=5):
             f"correlate requires the same shape, got {shape1} and {shape2}"
         )
 
-    proj_fts_conj = proj_fts.conj()
-
     img_autocc = torch.abs(ift_and_shift(img_ft * img_ft.conj()))
-    proj_autocc = torch.abs(ift_and_shift(proj_fts * proj_fts_conj, dim=(1, 2)))
+    proj_autocc = torch.abs(ift_and_shift(proj_fts * proj_fts.conj(), dim=(1, 2)))
     denoms = torch.sqrt(img_autocc.amax()) * torch.sqrt(proj_autocc.amax(dim=(1, 2)))
 
-    best_ccs = torch.zeros(len(denoms), device=denoms.device)
-    for _, proj_fts_conj_rot in rotations(proj_fts_conj, range(0, 360, angle_step)):
-        ccs = torch.abs(ift_and_shift(img_ft[None] * proj_fts_conj_rot))
+    best_ccs = torch.zeros(len(proj_fts), device=proj_fts.device)
+    for _, img_ft_rot in rotations(img_ft, range(0, 360, angle_step)):
+        ccs = torch.abs(ift_and_shift(img_ft_rot[None] * proj_fts.conj(), dim=(1, 2)))
         max_norm_ccs = torch.amax(ccs, dim=(1, 2)) / denoms
         best_ccs = torch.amax(torch.stack([max_norm_ccs, best_ccs]), dim=0)
     return best_ccs
