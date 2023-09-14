@@ -36,6 +36,7 @@ dependencies = [
     "rich",
     "click",
     "pydantic<2",
+    "xmltodict",
 ]
 
 # extras
@@ -59,7 +60,7 @@ repository = "https://github.com/brisvag/emscan"
 
 # same as console_scripts entry point
 [project.scripts]
-emscan = "emscan:cli"
+emscan = "emscan:main.cli"
 
 # Entry points
 # https://peps.python.org/pep-0621/#entry-points

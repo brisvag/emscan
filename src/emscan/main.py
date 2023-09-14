@@ -19,12 +19,6 @@ import emscan
     help="Whether to update the projection database.",
 )
 @click.option(
-    "-r",
-    "--bin-resolution",
-    type=float,
-    default=4,
-)
-@click.option(
     "-q",
     "--emdb-query",
     type=str,
@@ -36,19 +30,21 @@ import emscan
     default="~/.emdb_projections/",
     help="Where to save the database of projections.",
 )
+@click.option("-v", "--verbose", count=True)
 @click.option("-f", "--overwrite", is_flag=True, help="overwrite output if exists")
 @click.version_option(version=emscan.__version__)
 def cli(
     classes,
     update_list,
     update_projections,
-    bin_resolution,
     emdb_query,
     emdb_save_path,
+    verbose,
     overwrite,
 ):
     """Find emdb entries similar to the given 2D classes."""
     import json
+    import logging
     import re
     from pathlib import Path
 
@@ -56,16 +52,32 @@ def cli(
     import numpy as np
     import sh
     import torch
+    import xmltodict
+    from rich.logging import RichHandler
     from rich.progress import Progress
+    from torch.multiprocessing import Pool, set_start_method
 
     from emscan.functions import (
         coerce_ndim,
-        correlate_rotations,
-        match_px_size,
+        compute_cc,
+        ft_and_shift,
         normalize,
-        rescale,
-        rotated_projections,
+        pad_to,
+        rescale_ft,
+        rotated_projection_fts,
     )
+
+    logging.basicConfig(
+        level=40 - max(verbose * 10, 0),
+        format="%(message)s",
+        datefmt="[%X]",
+        handlers=[RichHandler()],
+    )
+    log = logging.getLogger("emscan")
+
+    bin_resolution = 4
+    aggregation = 5
+    healpix_order = 2
 
     emdb_save_path = Path(emdb_save_path).expanduser().resolve()
 
@@ -79,82 +91,116 @@ def cli(
         )
 
     entries = sorted(emdb_save_path.glob("*.xml"))
-    torch.set_default_tensor_type(torch.FloatTensor)
-    with Progress() as prog:
+
+    torch.set_default_tensor_type(torch.HalfTensor)
+
+    with Progress(disable=False) as prog:
         if update_projections:
-            for entry in prog.track(
+            proj_aggregated = {}
+            agg_idx = 0
+            for entry_xml in prog.track(
                 entries, description="Updating projection database..."
             ):
-                entry_id = re.search(r"emd-(\d+)", entry.stem).group(1)
+                entry_id = re.search(r"emd-(\d+)", entry_xml.stem).group(1)
 
-                proj_path = emdb_save_path / f"{entry_id}_proj.mrc"
-                if proj_path.exists() and not overwrite:
+                entry_pt = emdb_save_path / f"{entry_id}.pt"
+                if entry_pt.exists() and not overwrite:
+                    log.warn(f"{entry_id} projections exist, skipping")
+                    continue
+
+                with open(entry_xml, "rb") as f:
+                    entry_metadata = xmltodict.parse(f)
+
+                px_size = np.array(
+                    [
+                        float(v["#text"])
+                        for v in entry_metadata["emd"]["map"]["pixel_spacing"].values()
+                    ]
+                )
+                shape = np.array(
+                    [
+                        int(i)
+                        for i in entry_metadata["emd"]["map"]["dimensions"].values()
+                    ]
+                )
+                volume = np.prod(np.array(shape) * px_size) / 1e3  # nm^3
+                if volume > 1e6:
+                    # rule of thumb: too big to be worth working with
+                    log.warn(f"{entry_id} is too big, skipping")
+                    continue
+                if not np.allclose(shape, shape[0]):
+                    # only deal with square for now
+                    log.warn(f"{entry_id} is not square, skipping")
                     continue
 
                 img_path = emdb_save_path / f"emd_{entry_id}.map"
 
                 if not img_path.exists():
+                    log.info(f"downloading {entry_id}")
                     gz_name = f"emd_{entry_id}.map.gz"
                     sync_path = f"rsync.ebi.ac.uk::pub/databases/emdb/structures/EMD-{entry_id}/map/{gz_name}"
                     rsync(sync_path, emdb_save_path)
                     sh.gzip("-d", str(emdb_save_path / gz_name))
 
+                log.info(f"projecting {entry_id}")
                 with mrcfile.open(img_path) as mrc:
-                    img = mrc.data
-                    px_size = mrc.voxel_size.x.item()
+                    data = coerce_ndim(mrc.data.astype(np.float16, copy=True), 3)
 
-                if px_size < bin_resolution:
-                    img = rescale(img, px_size, bin_resolution)
-                    px_size = bin_resolution
-                img = normalize(img)
-                proj = rotated_projections(img, healpix_order=2)
-
-                with mrcfile.new(
-                    emdb_save_path / proj_path,
-                    proj.astype(np.float32),
-                    overwrite=overwrite,
-                ) as mrc:
-                    mrc.voxel_size = (px_size, px_size, 1)
-                    mrc.set_image_stack()
+                img = normalize(torch.from_numpy(data), dim=(1, 2))
+                ft = rescale_ft(
+                    ft_and_shift(img, dim=(1, 2)), px_size, bin_resolution, dim=(1, 2)
+                )
+                proj = rotated_projection_fts(ft, healpix_order=healpix_order)
+                print(proj.shape)
 
                 img_path.unlink()
 
-        projections = sorted(emdb_save_path.glob("*_proj.mrc"))
+                if len(proj_aggregated) < aggregation:
+                    proj_aggregated[entry_id] = proj
+                else:
+                    log.info(f"creating aggregated tensor {agg_idx}")
+                    max_shape = np.max(
+                        [p.shape for p in proj_aggregated.values()], axis=0
+                    )
+                    resized = [
+                        pad_to(p, max_shape, dim=(1, 2))
+                        for p in proj_aggregated.values()
+                    ]
+                    agg = torch.concat(resized)
+                    agg.entries = list(proj_aggregated.keys())
+                    agg.entry_stride = max_shape[0]
+                    torch.save(agg, emdb_save_path / f"agg{agg_idx:02}.pt")
+                    proj_aggregated.clear()
+                    agg_idx += 1
+            if len(proj_aggregated):
+                log.info(f"creating aggregated tensor {agg_idx}")
+                max_shape = np.max([p.shape for p in proj_aggregated.values()], axis=0)
+                resized = [
+                    pad_to(p, max_shape, dim=(1, 2)) for p in proj_aggregated.values()
+                ]
+                agg = torch.concat(resized)
+                agg.entries = list(proj_aggregated.keys())
+                agg.entry_stride = max_shape[0]
+                torch.save(agg, emdb_save_path / f"agg{agg_idx:02}.pt")
+                proj_aggregated.clear()
 
-        with mrcfile.mmap(classes) as mrc:
-            class_data = coerce_ndim(torch.tensor(mrc.data, device="cuda"), 3)
-            class_px_size = mrc.voxel_size.x.item()
+        set_start_method("spawn", force=True)
 
-        main_task = prog.add_task(description="Input classes...")
-        task = prog.add_task(description="Entries...")
-        subtask = prog.add_task(description="Cross-correlating...")
+        agg_proj = sorted(emdb_save_path.glob("agg*.pt"))
 
-        corr_values = []
-        for _cls_idx, cls in enumerate(class_data):
-            corr_values_cls = {}
-            corr_values.append(corr_values_cls)
-            for proj_path in projections:
-                entry_id = re.match(r"\d+", proj_path.stem).group()
-                corr_values_cls[entry_id] = 0
-                with mrcfile.mmap(proj_path) as mrc:
-                    proj_stack_data = torch.tensor(mrc.data, device="cuda")
-                    proj_px_size = mrc.voxel_size.x.item()
-
-                cls_reshaped, proj_stack_reshaped, px_size = match_px_size(
-                    cls, proj_stack_data, class_px_size, proj_px_size, dim=(-2, -1)
-                )
-
-                for cc in correlate_rotations(cls_reshaped, proj_stack_reshaped):
-                    corr_values_cls[entry_id] = cc
-
-                    prog.update(subtask, advance=100 / len(proj_stack_data))
-                prog.update(subtask, completed=0)
-                prog.update(task, advance=100 / len(projections))
-            prog.update(task, completed=0)
-            prog.update(main_task, advance=100 / len(class_data))
-        prog.update(subtask, completed=100)
-        prog.update(task, completed=100)
-        prog.update(main_task, completed=100)
+        corr_values = {}
+        devices = torch.cuda.device_count()
+        with Pool(processes=devices) as pool:
+            results = pool.starmap_async(
+                compute_cc,
+                [
+                    (classes, agg, f"cuda:{idx%devices}", bin_resolution)
+                    for idx, agg in enumerate(agg_proj)
+                ],
+            )
+            for agg_result in results.get():
+                for cls_idx, entries in agg_result.items():
+                    corr_values.setdefault(cls_idx, {}).update(entries)
 
         with open("/home/lorenzo/tmp/correlation_output.json", "w+") as f:
             json.dump(corr_values, f)
