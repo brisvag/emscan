@@ -1,3 +1,5 @@
+import gc
+import inspect
 from functools import reduce
 from itertools import chain
 from math import ceil, floor
@@ -15,12 +17,40 @@ from torchvision.transforms import InterpolationMode
 from torchvision.transforms.functional import rotate
 
 
+def _print_tensors(depth=2):
+    """Print info about tensor variables locally and nonlocally."""
+    print("=" * 80)
+    for obj in gc.get_objects():
+        frame = inspect.currentframe()
+        frames = []
+        for _i in range(depth):
+            frame = frame.f_back
+            frames.append(frame)
+        try:
+            if torch.is_tensor(obj) or (
+                hasattr(obj, "data") and torch.is_tensor(obj.data)
+            ):
+                for gobj, gobjid in globals().items():
+                    if gobjid is obj and gobj not in ("obj", "gobjid"):
+                        print("GLOBAL:\t", gobj, obj.size(), obj.data_ptr())
+                for frame in frames:
+                    fname = frame.f_code.co_name
+                    locs = frame.f_locals
+                    for gobj, gobjid in locs.items():
+                        if gobjid is obj and gobj not in ("obj", "gobjid"):
+                            print(f"{fname}():\t", gobj, obj.size(), obj.data_ptr())
+        except:  # noqa
+            pass
+    print("=" * 80)
+
+
 def normalize(img, dim=None):
     """Normalize images to std=1 and mean=0."""
     if not torch.is_complex(img):
         img = img.to(torch.float32)
     img -= img.mean(dim=dim, keepdim=True)
     img /= img.std(dim=dim, keepdim=True)
+    img = torch.nan_to_num(img, out=img)
     return img
 
 
@@ -40,7 +70,6 @@ def rotations(img, degree_range, center=None):
     if center is None:
         center = list(np.array(img.shape) // 2)
 
-    rot = None
     for angle in degree_range:
         if torch.is_complex(img):
             real = rotate(
@@ -56,6 +85,7 @@ def rotations(img, degree_range, center=None):
                 interpolation=InterpolationMode.BILINEAR,
             )[0]
             rot = angle, real + (1j * imag)
+            del real, imag
         else:
             rot = (
                 angle,
@@ -67,6 +97,7 @@ def rotations(img, degree_range, center=None):
                 )[0],
             )
         yield rot
+        del rot
 
 
 def coerce_ndim(img, ndim):
@@ -148,7 +179,7 @@ def pad_to(img, target_shape, dim=None):
     return torch.nn.functional.pad(img, padding)
 
 
-def rescale_ft(ft, px_size_in, px_size_out, dim=None):
+def crop_or_pad_from_px_sizes(ft, px_size_in, px_size_out, dim=None):
     """Rescale an image's ft given before/after pixel sizes."""
     ratio = np.array(px_size_in) / np.array(px_size_out)
     if np.allclose(ratio, 1):
@@ -162,7 +193,7 @@ def correlate_rotations(img_ft, proj_fts, angle_step=5):
 
     Performs also rotations. Input fts must be fftshifted+fftd+fftshifted.
     """
-    shape1 = tuple(img_ft.shape[1:])
+    shape1 = tuple(img_ft.shape)
     shape2 = tuple(proj_fts.shape[1:])
     if not np.allclose(shape1, shape2):
         raise RuntimeError(
@@ -172,16 +203,23 @@ def correlate_rotations(img_ft, proj_fts, angle_step=5):
     img_autocc = torch.abs(ift_and_shift(img_ft * img_ft.conj()))
     proj_autocc = torch.abs(ift_and_shift(proj_fts * proj_fts.conj(), dim=(1, 2)))
     denoms = torch.sqrt(img_autocc.amax()) * torch.sqrt(proj_autocc.amax(dim=(1, 2)))
+    del img_autocc, proj_autocc
 
     best_ccs = torch.zeros(len(proj_fts), device=proj_fts.device)
     for _, img_ft_rot in rotations(img_ft, range(0, 360, angle_step)):
-        ccs = torch.abs(ift_and_shift(img_ft_rot[None] * proj_fts.conj(), dim=(1, 2)))
-        max_norm_ccs = torch.amax(ccs, dim=(1, 2)) / denoms
-        best_ccs = torch.amax(torch.stack([max_norm_ccs, best_ccs]), dim=0)
+        ccs = (
+            torch.abs(
+                ift_and_shift(img_ft_rot[None] * proj_fts.conj(), dim=(1, 2))
+            ).amax(dim=(1, 2))
+            / denoms
+        )
+        best_ccs = torch.amax(torch.stack([ccs, best_ccs]), dim=0)
+        del ccs
     return best_ccs
 
 
 def compute_cc(cls_path, agg_path, device=None, bin_resolution=4):
+    corr_values = {}
     torch.set_default_tensor_type(torch.cuda.FloatTensor)
     with torch.cuda.device(device):
         with mrcfile.mmap(cls_path) as mrc:
@@ -191,11 +229,17 @@ def compute_cc(cls_path, agg_path, device=None, bin_resolution=4):
         class_data = normalize(coerce_ndim(class_data, 3), dim=(1, 2))
         entry_data = torch.load(agg_path, map_location=device)
 
+        # crop/pad ft to match pixel size
         class_ft = ft_and_shift(class_data, dim=(1, 2))
-        class_ft = rescale_ft(class_ft, class_px_size, bin_resolution, dim=(1, 2))
-        class_ft = pad_to(class_ft, entry_data.shape, dim=(1, 2))
+        class_ft = crop_or_pad_from_px_sizes(
+            class_ft, class_px_size, bin_resolution, dim=(1, 2)
+        )
+        class_data = ift_and_shift(class_ft, dim=(1, 2))
+        # crop/pad in real space to match target shape
+        class_data = resize(class_data, entry_data.shape, dim=(1, 2))
+        # go back to ft
+        class_ft = ft_and_shift(class_data, dim=(1, 2))
 
-        corr_values = {}
         for cls_idx, cls in enumerate(class_ft):
             ccs = correlate_rotations(cls, entry_data)
             for i, entry in enumerate(entry_data.entries):

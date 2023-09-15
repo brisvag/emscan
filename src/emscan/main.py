@@ -57,13 +57,12 @@ def cli(
     from rich.progress import Progress
     from torch.multiprocessing import Pool, set_start_method
 
-    from emscan.functions import (
-        coerce_ndim,
+    from emscan._functions import (
         compute_cc,
+        crop_or_pad_from_px_sizes,
         ft_and_shift,
         normalize,
         pad_to,
-        rescale_ft,
         rotated_projection_fts,
     )
 
@@ -144,14 +143,13 @@ def cli(
 
                 log.info(f"projecting {entry_id}")
                 with mrcfile.open(img_path) as mrc:
-                    data = coerce_ndim(mrc.data.astype(np.float16, copy=True), 3)
+                    data = mrc.data.astype(np.float32, copy=True)
 
-                img = normalize(torch.from_numpy(data), dim=(1, 2))
-                ft = rescale_ft(
-                    ft_and_shift(img, dim=(1, 2)), px_size, bin_resolution, dim=(1, 2)
+                img = normalize(torch.from_numpy(data))
+                ft = crop_or_pad_from_px_sizes(
+                    ft_and_shift(img), px_size, bin_resolution
                 )
                 proj = rotated_projection_fts(ft, healpix_order=healpix_order)
-                print(proj.shape)
 
                 img_path.unlink()
 
@@ -184,12 +182,12 @@ def cli(
                 torch.save(agg, emdb_save_path / f"agg{agg_idx:02}.pt")
                 proj_aggregated.clear()
 
-        set_start_method("spawn", force=True)
-
         agg_proj = sorted(emdb_save_path.glob("agg*.pt"))
 
         corr_values = {}
         devices = torch.cuda.device_count()
+
+        set_start_method("spawn", force=True)
         with Pool(processes=devices) as pool:
             results = pool.starmap_async(
                 compute_cc,
