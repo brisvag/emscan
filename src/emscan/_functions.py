@@ -139,25 +139,6 @@ def gaussian_window(shape, sigmas=1, device=None):
     return reduce(mul, tensors)
 
 
-def resize(ft, target_shape, dim=None):
-    """Bin or unbin image(s) ft by fourier cropping or padding."""
-    if dim is None:
-        dim = tuple(range(ft.ndim))
-
-    target_shape = np.array(target_shape)
-    if np.all(target_shape <= ft.shape):
-        ft_resized = crop_to(ft, target_shape, dim=dim)
-        # needed for edge artifacts
-        cropped_shape = np.array(ft_resized.shape)
-        window = gaussian_window(cropped_shape, cropped_shape / 3)
-        ft_resized *= window
-        return ft_resized
-    elif np.all(target_shape >= ft.shape):
-        return pad_to(ft, target_shape, dim=dim)
-    else:
-        raise NotImplementedError("cannot pad and crop at the same time")
-
-
 def crop_to(img, target_shape, dim=None):
     if dim is None:
         dim = tuple(range(img.ndim))
@@ -179,11 +160,31 @@ def pad_to(img, target_shape, dim=None):
     return torch.nn.functional.pad(img, padding)
 
 
+def resize(ft, target_shape, dim=None):
+    """Bin or unbin image(s) ft by fourier cropping or padding."""
+    if dim is None:
+        dim = tuple(range(ft.ndim))
+
+    target_shape = np.array(target_shape)
+    input_shape = np.array(ft.shape)
+    if np.all(target_shape[list(dim)] == input_shape[list(dim)]):
+        return ft
+    elif np.all(target_shape < ft.shape):
+        ft_resized = crop_to(ft, target_shape, dim=dim)
+        # needed for edge artifacts
+        cropped_shape = np.array(ft_resized.shape)
+        window = gaussian_window(cropped_shape, cropped_shape / 3)
+        ft_resized *= window
+        return ft_resized
+    elif np.all(target_shape > ft.shape):
+        return pad_to(ft, target_shape, dim=dim)
+    else:
+        raise NotImplementedError("cannot pad and crop at the same time")
+
+
 def crop_or_pad_from_px_sizes(ft, px_size_in, px_size_out, dim=None):
     """Rescale an image's ft given before/after pixel sizes."""
     ratio = np.array(px_size_in) / np.array(px_size_out)
-    if np.allclose(ratio, 1):
-        return ft
     target_shape = np.round(np.array(ft.shape) * ratio / 2) * 2
     return resize(ft, target_shape, dim=dim)
 

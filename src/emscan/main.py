@@ -93,7 +93,7 @@ def gen_db(
 
     rsync = sh.rsync.bake("-rltpvzhu", "--info=progress2")
 
-    with Progress() as prog:
+    with Progress(disable=False) as prog:
         if update_list:
             task = prog.add_task(description="Updating header database...", start=False)
             rsync_with_progress(prog, task, EMDB_HEADERS, db_path)
