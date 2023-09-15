@@ -47,6 +47,7 @@ def cli(
     import logging
     import re
     from pathlib import Path
+    from time import sleep
 
     import mrcfile
     import numpy as np
@@ -61,8 +62,8 @@ def cli(
         compute_cc,
         crop_or_pad_from_px_sizes,
         ft_and_shift,
+        load_class_data,
         normalize,
-        pad_to,
         rotated_projection_fts,
     )
 
@@ -75,7 +76,6 @@ def cli(
     log = logging.getLogger("emscan")
 
     bin_resolution = 4
-    aggregation = 5
     healpix_order = 2
 
     emdb_save_path = Path(emdb_save_path).expanduser().resolve()
@@ -95,8 +95,6 @@ def cli(
 
     with Progress(disable=False) as prog:
         if update_projections:
-            proj_aggregated = {}
-            agg_idx = 0
             for entry_xml in prog.track(
                 entries, description="Updating projection database..."
             ):
@@ -151,54 +149,44 @@ def cli(
                 )
                 proj = rotated_projection_fts(ft, healpix_order=healpix_order)
 
+                log.info(f"Saving tensor: {entry_id}")
+                torch.save(proj, entry_pt)
+
                 img_path.unlink()
 
-                if len(proj_aggregated) < aggregation:
-                    proj_aggregated[entry_id] = proj
-                else:
-                    log.info(f"creating aggregated tensor {agg_idx}")
-                    max_shape = np.max(
-                        [p.shape for p in proj_aggregated.values()], axis=0
-                    )
-                    resized = [
-                        pad_to(p, max_shape, dim=(1, 2))
-                        for p in proj_aggregated.values()
-                    ]
-                    agg = torch.concat(resized)
-                    agg.entries = list(proj_aggregated.keys())
-                    agg.entry_stride = max_shape[0]
-                    torch.save(agg, emdb_save_path / f"agg{agg_idx:02}.pt")
-                    proj_aggregated.clear()
-                    agg_idx += 1
-            if len(proj_aggregated):
-                log.info(f"creating aggregated tensor {agg_idx}")
-                max_shape = np.max([p.shape for p in proj_aggregated.values()], axis=0)
-                resized = [
-                    pad_to(p, max_shape, dim=(1, 2)) for p in proj_aggregated.values()
-                ]
-                agg = torch.concat(resized)
-                agg.entries = list(proj_aggregated.keys())
-                agg.entry_stride = max_shape[0]
-                torch.save(agg, emdb_save_path / f"agg{agg_idx:02}.pt")
-                proj_aggregated.clear()
-
-        agg_proj = sorted(emdb_save_path.glob("agg*.pt"))
+        entries = sorted(emdb_save_path.glob("*.pt"))
 
         corr_values = {}
-        devices = torch.cuda.device_count()
 
         set_start_method("spawn", force=True)
+        devices = torch.cuda.device_count()
+
+        task = prog.add_task(description="Correlating...")
         with Pool(processes=devices) as pool:
-            results = pool.starmap_async(
-                compute_cc,
-                [
-                    (classes, agg, f"cuda:{idx%devices}", bin_resolution)
-                    for idx, agg in enumerate(agg_proj)
-                ],
-            )
-            for agg_result in results.get():
-                for cls_idx, entries in agg_result.items():
-                    corr_values.setdefault(cls_idx, {}).update(entries)
+            # pre-load class data for each gpu
+            cls_data = {
+                device: load_class_data(
+                    classes, device=device, bin_resolution=bin_resolution
+                )
+                for device in range(devices)
+            }
+
+            results = [
+                pool.apply_async(
+                    compute_cc,
+                    (cls_data[(device := idx % devices)], entry, f"cuda:{device}"),
+                )
+                for idx, entry in enumerate(entries)
+            ]
+            while len(results):
+                sleep(0.1)
+                for res in tuple(results):
+                    if res.ready():
+                        entry_path, cc_dict = res.get()
+                        for cls_idx, cc in cc_dict.items():
+                            corr_values.setdefault(cls_idx, {})[entry_path.stem] = cc
+                        prog.update(task, advance=100 / len(entries))
+                        results.pop(results.index(res))
 
         with open("/home/lorenzo/tmp/correlation_output.json", "w+") as f:
             json.dump(corr_values, f)
