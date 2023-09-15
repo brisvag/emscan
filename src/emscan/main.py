@@ -70,13 +70,14 @@ def gen_db(
     import sh
     import torch
     import xmltodict
-    from rich.progress import track
+    from rich.progress import Progress
 
     from emscan._functions import (
         crop_or_pad_from_px_sizes,
         ft_and_shift,
         normalize,
         rotated_projection_fts,
+        rsync_with_progress,
     )
 
     db_path = ctx.obj["db_path"]
@@ -85,70 +86,78 @@ def gen_db(
 
     BIN_RESOLUTION = 4
     HEALPIX_ORDER = 2
+    EMDB_HEADERS = "rsync.ebi.ac.uk::pub/databases/emdb/structures/*/header/*v30.xml"
+
     torch.set_default_tensor_type(torch.FloatTensor)
 
     rsync = sh.rsync.bake("-rltpvzhu", "--info=progress2")
 
-    if update_list:
-        print("Updating header database...")
-        rsync(
-            "rsync.ebi.ac.uk::pub/databases/emdb/structures/*/header/*v30.xml",
-            db_path,
-        )
+    with Progress() as prog:
+        if update_list:
+            task = prog.add_task(description="Updating header database...")
+            rsync_with_progress(prog, task, EMDB_HEADERS, db_path)
 
-    if update_projections:
-        entries = sorted(db_path.glob("*.xml"))
-        for entry_xml in track(entries, description="Updating projection database..."):
-            entry_id = re.search(r"emd-(\d+)", entry_xml.stem).group(1)
+        if update_projections:
+            task = prog.add_task(description="Updating projection database...")
+            entries = sorted(db_path.glob("*.xml"))
+            for entry_xml in entries:
+                entry_id = re.search(r"emd-(\d+)", entry_xml.stem).group(1)
 
-            entry_pt = db_path / f"{entry_id}.pt"
-            if entry_pt.exists() and not overwrite:
-                log.warn(f"{entry_id} projections exist, skipping")
-                continue
+                entry_pt = db_path / f"{entry_id}.pt"
+                if entry_pt.exists() and not overwrite:
+                    log.warn(f"{entry_id} projections exist, skipping")
+                    continue
 
-            with open(entry_xml, "rb") as f:
-                entry_metadata = xmltodict.parse(f)
+                with open(entry_xml, "rb") as f:
+                    entry_metadata = xmltodict.parse(f)
 
-            px_size = np.array(
-                [
-                    float(v["#text"])
-                    for v in entry_metadata["emd"]["map"]["pixel_spacing"].values()
-                ]
-            )
-            shape = np.array(
-                [int(i) for i in entry_metadata["emd"]["map"]["dimensions"].values()]
-            )
-            volume = np.prod(np.array(shape) * px_size) / 1e3  # nm^3
-            if volume > 1e6:
-                # rule of thumb: too big to be worth working with
-                log.warn(f"{entry_id} is too big, skipping")
-                continue
-            if not np.allclose(shape, shape[0]):
-                # only deal with square for now
-                log.warn(f"{entry_id} is not square, skipping")
-                continue
+                px_size = np.array(
+                    [
+                        float(v["#text"])
+                        for v in entry_metadata["emd"]["map"]["pixel_spacing"].values()
+                    ]
+                )
+                shape = np.array(
+                    [
+                        int(i)
+                        for i in entry_metadata["emd"]["map"]["dimensions"].values()
+                    ]
+                )
+                volume = np.prod(np.array(shape) * px_size) / 1e3  # nm^3
+                if volume > 1e6:
+                    # rule of thumb: too big to be worth working with
+                    log.warn(f"{entry_id} is too big, skipping")
+                    continue
+                if not np.allclose(shape, shape[0]):
+                    # only deal with square for now
+                    log.warn(f"{entry_id} is not square, skipping")
+                    continue
 
-            img_path = db_path / f"emd_{entry_id}.map"
+                img_path = db_path / f"emd_{entry_id}.map"
 
-            if not img_path.exists():
-                log.info(f"downloading {entry_id}")
-                gz_name = f"emd_{entry_id}.map.gz"
-                sync_path = f"rsync.ebi.ac.uk::pub/databases/emdb/structures/EMD-{entry_id}/map/{gz_name}"
-                rsync(sync_path, db_path)
-                sh.gzip("-d", str(db_path / gz_name))
+                if not img_path.exists():
+                    log.info(f"downloading {entry_id}")
+                    gz_name = f"emd_{entry_id}.map.gz"
+                    sync_path = "rsync.ebi.ac.uk::pub/databases/emdb/structures/EMD-{entry_id}/map/{gz_name}"
+                    rsync(sync_path, db_path)
+                    sh.gzip("-d", str(db_path / gz_name))
 
-            log.info(f"projecting {entry_id}")
-            with mrcfile.open(img_path) as mrc:
-                data = mrc.data.astype(np.float32, copy=True)
+                log.info(f"projecting {entry_id}")
+                with mrcfile.open(img_path) as mrc:
+                    data = mrc.data.astype(np.float32, copy=True)
 
-            img = normalize(torch.from_numpy(data))
-            ft = crop_or_pad_from_px_sizes(ft_and_shift(img), px_size, BIN_RESOLUTION)
-            proj = rotated_projection_fts(ft, healpix_order=HEALPIX_ORDER)
+                img = normalize(torch.from_numpy(data))
+                ft = crop_or_pad_from_px_sizes(
+                    ft_and_shift(img), px_size, BIN_RESOLUTION
+                )
+                proj = rotated_projection_fts(ft, healpix_order=HEALPIX_ORDER)
 
-            log.info(f"Saving tensor: {entry_id}")
-            torch.save(proj, entry_pt)
+                log.info(f"Saving tensor: {entry_id}")
+                torch.save(proj, entry_pt)
 
-            img_path.unlink()
+                img_path.unlink()
+
+                prog.update(task, advance=100 / len(entries))
 
 
 @cli.command()
@@ -194,8 +203,6 @@ def scan(
 
     entries = sorted(db_path.glob("*.pt"))
 
-    corr_values = {}
-
     set_start_method("spawn", force=True)
     devices = torch.cuda.device_count()
 
@@ -217,6 +224,7 @@ def scan(
                 )
                 for idx, entry in enumerate(entries)
             ]
+            corr_values = {}
             while len(results):
                 sleep(0.1)
                 for res in tuple(results):

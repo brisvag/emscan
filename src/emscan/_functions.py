@@ -1,6 +1,7 @@
 import gc
 import inspect
-from functools import reduce
+import re
+from functools import partial, reduce
 from itertools import chain
 from math import ceil, floor
 from operator import mul
@@ -8,8 +9,10 @@ from operator import mul
 import healpy
 import mrcfile
 import numpy as np
+import sh
 import torch
 from morphosamplers.sampler import sample_subvolumes
+from rich import print
 from scipy.signal.windows import gaussian
 from scipy.spatial.transform import Rotation
 from torch.fft import fftn, fftshift, ifftn, ifftshift
@@ -258,3 +261,22 @@ def load_class_data(cls_path, device=None, bin_resolution=4):
         class_data = ift_and_shift(class_ft, dim=(1, 2))
         del class_ft
     return class_data
+
+
+def rsync_with_progress(progress, task, remote_path, local_path):
+    percent = re.compile(r"(\d+)%")
+
+    def _process_output(task, line):
+        if match := percent.search(line):
+            progress.update(task, completed=match.group(1))
+
+    rsync = sh.rsync.bake("-rltpvzhu", "--info=progress2")
+    proc = rsync(
+        "rsync.ebi.ac.uk::pub/databases/emdb/structures/*/header/*v30.xml",
+        local_path,
+        _out=partial(_process_output, task),
+        _err=print,
+        _bg=True,
+    )
+
+    proc.wait()
