@@ -123,12 +123,9 @@ def rotated_projection_fts(ft, healpix_order=2):
     angles = np.stack(angles).T
     rot = Rotation.from_euler("xz", angles)
     pos = np.array(ft.shape) / 2
-    # get an even size grid that ensures we include everything
-    grid_size = int(np.ceil(np.linalg.norm(ft.shape)))
-    grid_size += grid_size % 2
-    grid_shape = (grid_size, grid_size, 1)
+    grid_size = (ft.shape[0], ft.shape[0], 1)
     slices = sample_subvolumes(
-        np.array(ft), positions=pos, orientations=rot, grid_shape=grid_shape
+        np.array(ft), positions=pos, orientations=rot, grid_shape=grid_size
     ).squeeze()
 
     return torch.from_numpy(slices)
