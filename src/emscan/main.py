@@ -30,6 +30,13 @@ import emscan
     default="~/.emdb_projections/",
     help="Where to save the database of projections.",
 )
+@click.option(
+    "-o",
+    "--output",
+    default="./correlation_output.json",
+    type=click.Path(dir_okay=False, file_okay=True),
+    help="Output json file with the cc data",
+)
 @click.option("-v", "--verbose", count=True)
 @click.option("-f", "--overwrite", is_flag=True, help="overwrite output if exists")
 @click.version_option(version=emscan.__version__)
@@ -39,6 +46,7 @@ def cli(
     update_projections,
     emdb_query,
     emdb_save_path,
+    correlation_output,
     verbose,
     overwrite,
 ):
@@ -74,6 +82,10 @@ def cli(
         handlers=[RichHandler()],
     )
     log = logging.getLogger("emscan")
+
+    output = Path(correlation_output).expanduser().resolve()
+    if output.exists() and not overwrite:
+        raise click.UsageError("Output already exists. Pass -f to overwrite.")
 
     bin_resolution = 4
     healpix_order = 2
@@ -188,7 +200,7 @@ def cli(
                         prog.update(task, advance=100 / len(entries))
                         results.pop(results.index(res))
 
-        with open("/home/lorenzo/tmp/correlation_output.json", "w+") as f:
+        with open(correlation_output, "w+") as f:
             json.dump(corr_values, f)
 
 
