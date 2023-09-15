@@ -91,7 +91,7 @@ def cli(
 
     entries = sorted(emdb_save_path.glob("*.xml"))
 
-    torch.set_default_tensor_type(torch.HalfTensor)
+    torch.set_default_tensor_type(torch.FloatTensor)
 
     with Progress(disable=False) as prog:
         if update_projections:

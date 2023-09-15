@@ -47,7 +47,7 @@ def _print_tensors(depth=2):
 def normalize(img, dim=None):
     """Normalize images to std=1 and mean=0."""
     if not torch.is_complex(img):
-        img = img.to(torch.float16)
+        img = img.to(torch.float32)
     img -= img.mean(dim=dim, keepdim=True)
     img /= img.std(dim=dim, keepdim=True)
     img = torch.nan_to_num(img, out=img)
@@ -222,7 +222,7 @@ def correlate_rotations(img_ft, proj_fts, angle_step=5):
 def compute_cc(class_data, entry_path, device=None):
     corr_values = {}
     with torch.cuda.device(device):
-        torch.set_default_tensor_type(torch.cuda.HalfTensor)
+        torch.set_default_tensor_type(torch.cuda.FloatTensor)
 
         entry_data = torch.load(entry_path, map_location=device)
 
@@ -242,7 +242,7 @@ def compute_cc(class_data, entry_path, device=None):
 
 def load_class_data(cls_path, device=None, bin_resolution=4):
     with torch.cuda.device(device):
-        torch.set_default_tensor_type(torch.cuda.HalfTensor)
+        torch.set_default_tensor_type(torch.cuda.FloatTensor)
 
         with mrcfile.mmap(cls_path) as mrc:
             class_data = torch.tensor(mrc.data)
