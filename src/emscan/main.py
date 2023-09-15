@@ -33,7 +33,7 @@ import emscan
 @click.option(
     "-o",
     "--output",
-    default="./correlation_output.json",
+    default="./output.json",
     type=click.Path(dir_okay=False, file_okay=True),
     help="Output json file with the cc data",
 )
@@ -46,7 +46,7 @@ def cli(
     update_projections,
     emdb_query,
     emdb_save_path,
-    correlation_output,
+    output,
     verbose,
     overwrite,
 ):
@@ -83,7 +83,7 @@ def cli(
     )
     log = logging.getLogger("emscan")
 
-    output = Path(correlation_output).expanduser().resolve()
+    output = Path(output).expanduser().resolve()
     if output.exists() and not overwrite:
         raise click.UsageError("Output already exists. Pass -f to overwrite.")
 
@@ -200,7 +200,7 @@ def cli(
                         prog.update(task, advance=100 / len(entries))
                         results.pop(results.index(res))
 
-        with open(correlation_output, "w+") as f:
+        with open(output, "w+") as f:
             json.dump(corr_values, f)
 
 
