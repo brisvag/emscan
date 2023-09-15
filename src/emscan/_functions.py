@@ -268,7 +268,8 @@ def rsync_with_progress(progress, task, remote_path, local_path):
 
     def _process_output(task, line):
         if match := percent.search(line):
-            progress.update(task, completed=match.group(1))
+            progress.start_task(task)
+            progress.update(task, completed=int(match.group(1)))
 
     rsync = sh.rsync.bake("-rltpvzhu", "--info=progress2")
     proc = rsync(

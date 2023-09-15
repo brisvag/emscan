@@ -47,14 +47,12 @@ def cli(ctx, db_path, overwrite, verbose):
 
 
 @cli.command()
-@click.option(
-    "-l", "--update-list", is_flag=True, help="Whether to update the list of entries."
-)
+@click.option("-l", "--update-list", is_flag=True, help="Update the list of entries.")
 @click.option(
     "-p",
     "--update-projections",
     is_flag=True,
-    help="Whether to update the projection database.",
+    help="Update the projection database (takes a long time!).",
 )
 @click.pass_context
 def gen_db(
@@ -63,6 +61,9 @@ def gen_db(
     update_projections,
 ):
     """Generate the projection database."""
+    if not update_list and not update_projections:
+        raise click.UsageError("Must provide at least -l or -p.")
+
     import re
 
     import mrcfile
@@ -94,7 +95,7 @@ def gen_db(
 
     with Progress() as prog:
         if update_list:
-            task = prog.add_task(description="Updating header database...")
+            task = prog.add_task(description="Updating header database...", start=False)
             rsync_with_progress(prog, task, EMDB_HEADERS, db_path)
 
         if update_projections:
@@ -138,7 +139,7 @@ def gen_db(
                 if not img_path.exists():
                     log.info(f"downloading {entry_id}")
                     gz_name = f"emd_{entry_id}.map.gz"
-                    sync_path = "rsync.ebi.ac.uk::pub/databases/emdb/structures/EMD-{entry_id}/map/{gz_name}"
+                    sync_path = f"rsync.ebi.ac.uk::pub/databases/emdb/structures/EMD-{entry_id}/map/{gz_name}"
                     rsync(sync_path, db_path)
                     sh.gzip("-d", str(db_path / gz_name))
 
@@ -167,7 +168,7 @@ def gen_db(
 @click.option(
     "-o",
     "--output",
-    default="./output.json",
+    default="./output.csv",
     type=click.Path(dir_okay=False, file_okay=True),
     help="Output json file with the cc data",
 )
@@ -178,10 +179,10 @@ def scan(
     output,
 ):
     """Find emdb entries similar to the given 2D classes."""
-    import json
     from pathlib import Path
     from time import sleep
 
+    import pandas as pd
     import torch
     from rich.progress import Progress
     from torch.multiprocessing import Pool, set_start_method
@@ -235,8 +236,41 @@ def scan(
                         prog.update(task, advance=100 / len(entries))
                         results.pop(results.index(res))
 
-    with open(output, "w+") as f:
-        json.dump(corr_values, f)
+    df = pd.DataFrame(corr_values)
+    df.index.name = "entry"
+    df.to_csv(output, sep="\t")
+
+
+@cli.command()
+@click.argument(
+    "correlation_results",
+    type=click.Path(exists=True, dir_okay=False, resolve_path=True),
+)
+@click.option("-g", "--class-group", multiple=True, type=str)
+@click.pass_context
+def show(ctx, correlation_results, class_group):
+    """Parse correlation results and show related emdb entries and plots."""
+    import pandas as pd
+
+    ctx.obj["db_path"]
+    ctx.obj["overwrite"]
+    # log = ctx.obj['log']
+
+    df = pd.read_csv(correlation_results, sep="\t", index_col="entry")
+
+    for group in class_group:
+        cols = group.split(",")
+        mean = df[cols].mean(axis=1)
+        df = df.drop(columns=cols)
+        df[group] = mean
+
+    df_top = pd.DataFrame()
+    df_top.index.name = "rank"
+    for col in df:
+        top_10_idx = df[col].sort_values()[::-1].index[:10]
+        top_10 = df[col].loc[top_10_idx].reset_index()
+        df_top[[f"{col}_entry", f"{col}_cc"]] = top_10
+    print(df_top)
 
 
 if __name__ == "__main__":
