@@ -250,9 +250,15 @@ def scan(
 @click.pass_context
 def show(ctx, correlation_results, class_group):
     """Parse correlation results and show related emdb entries and plots."""
+    import napari
+    import numpy as np
     import pandas as pd
+    import torch
+    from rich import print
 
-    ctx.obj["db_path"]
+    from emscan._functions import ift_and_shift
+
+    db_path = ctx.obj["db_path"]
     ctx.obj["overwrite"]
     # log = ctx.obj['log']
 
@@ -270,7 +276,18 @@ def show(ctx, correlation_results, class_group):
         top_10_idx = df[col].sort_values()[::-1].index[:10]
         top_10 = df[col].loc[top_10_idx].reset_index()
         df_top[[f"{col}_entry", f"{col}_cc"]] = top_10
+
     print(df_top)
+    v = napari.Viewer()
+    v.grid.enabled = True
+
+    uniq_entries = np.unique(np.ravel(df_top.iloc[:, ::2]))
+    for entry in uniq_entries:
+        ft = torch.load(db_path / f"{entry:04}.pt")
+        img = np.array(ift_and_shift(ft, dim=(1, 2)).real)
+        v.add_image(img, name=entry)
+
+    napari.run()
 
 
 if __name__ == "__main__":

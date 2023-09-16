@@ -182,9 +182,10 @@ def pad_to(img, target_shape, dim=None):
 def crop_or_pad_from_px_sizes(ft, px_size_in, px_size_out, dim=None):
     """Rescale an image's ft given before/after pixel sizes."""
     ratio = np.array(px_size_in) / np.array(px_size_out)
-    if np.allclose(ratio, 1):
-        return ft
     target_shape = np.round(np.array(ft.shape) * ratio / 2) * 2
+    dim = tuple(range(ft.ndim)) if dim is None else dim
+    if np.allclose(np.array(ft.shape)[list(dim)], np.array(target_shape)[list(dim)]):
+        return ft
     return resize(ft, target_shape, dim=dim)
 
 
