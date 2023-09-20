@@ -1,23 +1,31 @@
 import gc
 import inspect
+import os
 import re
 from functools import partial, reduce
 from itertools import chain
 from math import ceil, floor
 from operator import mul
+from threading import Semaphore
+from time import sleep
 
 import healpy
 import mrcfile
 import numpy as np
 import sh
 import torch
+import xmltodict
 from morphosamplers.sampler import sample_subvolumes
 from rich import print
 from scipy.signal.windows import gaussian
 from scipy.spatial.transform import Rotation
 from torch.fft import fftn, fftshift, ifftn, ifftshift
+from torch.multiprocessing import Pool, set_start_method
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms.functional import rotate
+
+BIN_RESOLUTION = 4
+HEALPIX_ORDER = 2
 
 
 def _print_tensors(depth=2):
@@ -112,11 +120,11 @@ def coerce_ndim(img, ndim):
     return img
 
 
-def rotated_projection_fts(ft, healpix_order=2):
+def rotated_projection_fts(ft):
     """Generate rotated projections fts of a map."""
     # TODO: sinc function to avoid edge artifacts
 
-    nside = healpy.order2nside(healpix_order)
+    nside = healpy.order2nside(HEALPIX_ORDER)
     npix = healpy.nside2npix(nside)
     # only half the views are needed, cause projection symmetry
     angles = healpy.pix2ang(nside, np.arange(npix // 2))
@@ -241,7 +249,7 @@ def compute_cc(class_data, entry_path, device=None):
     return entry_path, corr_values
 
 
-def load_class_data(cls_path, device=None, bin_resolution=4):
+def load_class_data(cls_path, device=None):
     with torch.cuda.device(device):
         torch.set_default_tensor_type(torch.cuda.FloatTensor)
 
@@ -254,24 +262,31 @@ def load_class_data(cls_path, device=None, bin_resolution=4):
         # crop/pad ft to match pixel size
         class_ft = ft_and_shift(class_data, dim=(1, 2))
         class_ft = crop_or_pad_from_px_sizes(
-            class_ft, class_px_size, bin_resolution, dim=(1, 2)
+            class_ft, class_px_size, BIN_RESOLUTION, dim=(1, 2)
         )
         class_data = ift_and_shift(class_ft, dim=(1, 2))
         del class_ft
     return class_data
 
 
-def rsync_with_progress(progress, task, remote_path, local_path):
+def rsync_with_progress(prog, task_desc, remote_path, local_path, dry_run):
+    if dry_run:
+        print(
+            f"Will update header list (currently have {len(list(local_path.glob('*.xml')))} headers)."
+        )
+        return
+
+    task = prog.add_task(description=task_desc, start=False)
     percent = re.compile(r"(\d+)%")
 
     def _process_output(task, line):
         if match := percent.search(line):
-            progress.start_task(task)
-            progress.update(task, completed=int(match.group(1)))
+            prog.start_task(task)
+            prog.update(task, completed=int(match.group(1)))
 
     rsync = sh.rsync.bake("-rltpvzhu", "--info=progress2")
     proc = rsync(
-        "rsync.ebi.ac.uk::pub/databases/emdb/structures/*/header/*v30.xml",
+        remote_path,
         local_path,
         _out=partial(_process_output, task),
         _err=print,
@@ -279,3 +294,148 @@ def rsync_with_progress(progress, task, remote_path, local_path):
     )
 
     proc.wait()
+
+
+def get_valid_entries(prog, db_path, log):
+    entries = sorted(db_path.glob("emd-*.xml"))
+    task = prog.add_task(description="Getting list of maps...", total=len(entries))
+    to_download = []
+    skipped = 0
+    for entry_xml in entries:
+        prog.update(task, advance=1)
+        entry_id = re.search(r"emd-(\d+)", entry_xml.stem).group(1)
+
+        with open(entry_xml, "rb") as f:
+            entry_metadata = xmltodict.parse(f)
+
+        px_size = np.array(
+            [
+                float(v["#text"])
+                for v in entry_metadata["emd"]["map"]["pixel_spacing"].values()
+            ]
+        )
+        shape = np.array(
+            [int(i) for i in entry_metadata["emd"]["map"]["dimensions"].values()]
+        )
+        size_mb = float(entry_metadata["emd"]["map"]["@size_kbytes"]) / 1e3
+        volume_nm = np.prod(np.array(shape) * px_size) / 1e3  # nm^3
+        if volume_nm > 3e6 or size_mb > 300:
+            # rule of thumb: too big to be worth working with
+            # 300MB is above the 80 percentile, 3e6 above 95, so we keep vast majority
+            # but we save a lot of bandwidth
+            log.info(
+                f"{entry_id} is too big ({volume_nm:.2} nm^3, {int(size_mb)} MB), skipping"
+            )
+            skipped += 1
+            # if proj_path.exists():
+            #     proj_path.unlink()
+            continue
+        if not np.allclose(shape, shape[0]):
+            # only deal with square for now (> 93% of entries)
+            log.info(f"{entry_id} is not square {shape}, skipping")
+            skipped += 1
+            # if proj_path.exists():
+            #     proj_path.unlink()
+            continue
+
+        img_path = db_path / f"emd_{entry_id}.map"
+        gz_path = db_path / f"emd_{entry_id}.map.gz"
+
+        if img_path.exists() or gz_path.exists():
+            log.info(f"{entry_id} was already extracted or downloaded")
+            continue
+        else:
+            to_download.append(entry_id)
+
+    log.warn(f"Will download {len(to_download)}")
+    log.warn(f"Skipping {skipped} entries (too big or weird)")
+    return to_download
+
+
+def download_maps(prog, db_path, to_download, dry_run):
+    if dry_run:
+        print(f"Will download {len(to_download)} maps")
+        return
+    task = prog.add_task(description="Downloading...", total=len(to_download))
+
+    rsync = sh.rsync.bake("-rltpvzhu", "--info=progress2")
+
+    pool = Semaphore(10)
+
+    def done(cmd, success, exit_code):
+        pool.release()
+        prog.update(task, advance=1, refresh=True)
+
+    def run_rsync(source_path):
+        pool.acquire()
+        return rsync(source_path, db_path, _bg=True, _done=done)
+
+    procs = []
+    for entry_id in to_download:
+        sync_path = f"rsync.ebi.ac.uk::pub/databases/emdb/structures/EMD-{entry_id}/map/emd_{entry_id}.map.gz"
+        procs.append(run_rsync(sync_path))
+
+    try:
+        for p in procs:
+            p.wait()
+    except sh.ErrorReturnCode:
+        for p in procs:
+            p.kill()
+
+
+def extract_maps(prog, db_path, dry_run):
+    gz_paths = sorted(db_path.glob("*.map.gz"))
+    if dry_run:
+        print(f"Will extract {len(gz_paths)} maps")
+        return
+    task = prog.add_task(description="Extracting...", total=len(gz_paths))
+
+    for gz_path in gz_paths:
+        sh.gzip("-d", str(gz_path))
+        prog.update(task, advance=1)
+
+
+def _project_map(map_path, proj_path):
+    with mrcfile.open(map_path) as mrc:
+        data = mrc.data.astype(np.float32, copy=True)
+        px_size = mrc.voxel_size.x.item()
+
+    img = normalize(torch.from_numpy(data))
+    ft = crop_or_pad_from_px_sizes(ft_and_shift(img), px_size, BIN_RESOLUTION)
+    proj = rotated_projection_fts(ft)
+
+    torch.save(proj, proj_path)
+    return proj_path
+
+
+def project_maps(prog, db_path, overwrite, log, dry_run):
+    maps = []
+    projections = []
+    for m in db_path.glob("*.map"):
+        proj = db_path / (re.search(r"\d+", m.stem).group() + ".pt")
+        if not overwrite and proj.exists():
+            continue
+        maps.append(m)
+        projections.append(proj)
+
+    if dry_run:
+        print(f"Will project {len(maps)} maps")
+        return
+
+    task = prog.add_task(description="Projecting...", total=len(maps))
+
+    torch.set_default_tensor_type(torch.FloatTensor)
+    set_start_method("spawn", force=True)
+
+    with Pool(processes=os.cpu_count() // 2) as pool:
+        results = [
+            pool.apply_async(_project_map, (m, p)) for m, p in zip(maps, projections)
+        ]
+        while len(results):
+            sleep(0.1)
+            for res in tuple(results):
+                if res.ready():
+                    proj_path = res.get()
+                    log.info(f"finished projecting {proj_path.stem}")
+                    prog.update(task, advance=1)
+                    results.pop(results.index(res))

@@ -17,6 +17,7 @@ import emscan
 @click.option(
     "-f", "--overwrite", is_flag=True, help="Overwrite outputs if they exist."
 )
+@click.option("-d", "--dry-run", is_flag=True)
 @click.option(
     "-v",
     "--verbose",
@@ -24,7 +25,7 @@ import emscan
     help="Verbosity level (can be passed multiple times).",
 )
 @click.pass_context
-def cli(ctx, db_path, overwrite, verbose):
+def cli(ctx, db_path, overwrite, verbose, dry_run):
     """Scan EMDB entries for similar 2D classes by comparing projections."""
     import logging
     from pathlib import Path
@@ -35,6 +36,7 @@ def cli(ctx, db_path, overwrite, verbose):
 
     ctx.obj["db_path"] = Path(db_path).expanduser().resolve()
     ctx.obj["overwrite"] = overwrite
+    ctx.obj["dry_run"] = dry_run
 
     logging.basicConfig(
         level=40 - max(verbose * 10, 0),
@@ -47,118 +49,74 @@ def cli(ctx, db_path, overwrite, verbose):
 
 
 @cli.command()
-@click.option("-l", "--update-list", is_flag=True, help="Update the list of entries.")
+@click.option(
+    "-l", "--list", "list_", is_flag=True, help="Update the list of entry headers."
+)
+@click.option(
+    "-m",
+    "--maps",
+    is_flag=True,
+    help="Download the emdb maps from the available headers.",
+)
 @click.option(
     "-p",
-    "--update-projections",
+    "--projections",
     is_flag=True,
-    help="Update the projection database (takes a long time!).",
+    help="Generate projections for all the available maps.",
 )
 @click.pass_context
 def gen_db(
     ctx,
-    update_list,
-    update_projections,
+    list_,
+    maps,
+    projections,
 ):
     """Generate the projection database."""
-    if not update_list and not update_projections:
-        raise click.UsageError("Must provide at least -l or -p.")
+    if not list_ and not maps and not projections:
+        raise click.UsageError("Must provide at least -l or -p or -m.")
 
-    import re
-
-    import mrcfile
-    import numpy as np
-    import sh
-    import torch
-    import xmltodict
     from rich.progress import Progress
 
     from emscan._functions import (
-        crop_or_pad_from_px_sizes,
-        ft_and_shift,
-        normalize,
-        rotated_projection_fts,
+        download_maps,
+        extract_maps,
+        get_valid_entries,
+        project_maps,
         rsync_with_progress,
     )
 
     db_path = ctx.obj["db_path"]
     overwrite = ctx.obj["overwrite"]
     log = ctx.obj["log"]
+    dry_run = ctx.obj["dry_run"]
 
-    BIN_RESOLUTION = 4
-    HEALPIX_ORDER = 2
     EMDB_HEADERS = "rsync.ebi.ac.uk::pub/databases/emdb/structures/*/header/*v30.xml"
 
-    torch.set_default_tensor_type(torch.FloatTensor)
+    with Progress(disable=False) as prog:
+        if list_:
+            rsync_with_progress(
+                prog,
+                task_desc="Updating header database...",
+                remote_path=EMDB_HEADERS,
+                local_path=db_path,
+                dry_run=dry_run,
+            )
 
-    rsync = sh.rsync.bake("-rltpvzhu", "--info=progress2")
+        if maps:
+            to_download = get_valid_entries(prog=prog, db_path=db_path, log=log)
+            download_maps(
+                prog=prog, db_path=db_path, to_download=to_download, dry_run=dry_run
+            )
+            extract_maps(prog=prog, db_path=db_path, dry_run=dry_run)
 
-    with Progress() as prog:
-        if update_list:
-            task = prog.add_task(description="Updating header database...", start=False)
-            rsync_with_progress(prog, task, EMDB_HEADERS, db_path)
-
-        if update_projections:
-            task = prog.add_task(description="Updating projection database...")
-            entries = sorted(db_path.glob("*.xml"))
-            for entry_xml in entries:
-                entry_id = re.search(r"emd-(\d+)", entry_xml.stem).group(1)
-
-                entry_pt = db_path / f"{entry_id}.pt"
-                if entry_pt.exists() and not overwrite:
-                    log.warn(f"{entry_id} projections exist, skipping")
-                    continue
-
-                with open(entry_xml, "rb") as f:
-                    entry_metadata = xmltodict.parse(f)
-
-                px_size = np.array(
-                    [
-                        float(v["#text"])
-                        for v in entry_metadata["emd"]["map"]["pixel_spacing"].values()
-                    ]
-                )
-                shape = np.array(
-                    [
-                        int(i)
-                        for i in entry_metadata["emd"]["map"]["dimensions"].values()
-                    ]
-                )
-                volume = np.prod(np.array(shape) * px_size) / 1e3  # nm^3
-                if volume > 1e6:
-                    # rule of thumb: too big to be worth working with
-                    log.warn(f"{entry_id} is too big, skipping")
-                    continue
-                if not np.allclose(shape, shape[0]):
-                    # only deal with square for now
-                    log.warn(f"{entry_id} is not square, skipping")
-                    continue
-
-                img_path = db_path / f"emd_{entry_id}.map"
-
-                if not img_path.exists():
-                    log.info(f"downloading {entry_id}")
-                    gz_name = f"emd_{entry_id}.map.gz"
-                    sync_path = f"rsync.ebi.ac.uk::pub/databases/emdb/structures/EMD-{entry_id}/map/{gz_name}"
-                    rsync(sync_path, db_path)
-                    sh.gzip("-d", str(db_path / gz_name))
-
-                log.info(f"projecting {entry_id}")
-                with mrcfile.open(img_path) as mrc:
-                    data = mrc.data.astype(np.float32, copy=True)
-
-                img = normalize(torch.from_numpy(data))
-                ft = crop_or_pad_from_px_sizes(
-                    ft_and_shift(img), px_size, BIN_RESOLUTION
-                )
-                proj = rotated_projection_fts(ft, healpix_order=HEALPIX_ORDER)
-
-                log.info(f"Saving tensor: {entry_id}")
-                torch.save(proj, entry_pt)
-
-                img_path.unlink()
-
-                prog.update(task, advance=100 / len(entries))
+        if projections:
+            project_maps(
+                prog=prog,
+                db_path=db_path,
+                overwrite=overwrite,
+                log=log,
+                dry_run=dry_run,
+            )
 
 
 @cli.command()
@@ -200,8 +158,6 @@ def scan(
     if output.exists() and not overwrite:
         raise click.UsageError("Output already exists. Pass -f to overwrite.")
 
-    BIN_RESOLUTION = 4
-
     entries = sorted(db_path.glob("*.pt"))
 
     set_start_method("spawn", force=True)
@@ -212,9 +168,7 @@ def scan(
         with Pool(processes=devices) as pool:
             # pre-load class data for each gpu
             cls_data = {
-                device: load_class_data(
-                    classes, device=device, bin_resolution=BIN_RESOLUTION
-                )
+                device: load_class_data(classes, device=device)
                 for device in range(devices)
             }
 
@@ -256,7 +210,7 @@ def show(ctx, correlation_results, class_group):
     import torch
     from rich import print
 
-    from emscan._functions import ift_and_shift
+    from emscan._functions import ift_and_shift, pad_to
 
     db_path = ctx.obj["db_path"]
     ctx.obj["overwrite"]
@@ -266,9 +220,9 @@ def show(ctx, correlation_results, class_group):
 
     for group in class_group:
         cols = group.split(",")
-        mean = df[cols].mean(axis=1)
+        best = df[cols].max(axis=1)
         df = df.drop(columns=cols)
-        df[group] = mean
+        df[group] = best
 
     df_top = pd.DataFrame()
     df_top.index.name = "rank"
@@ -282,9 +236,13 @@ def show(ctx, correlation_results, class_group):
     v.grid.enabled = True
 
     uniq_entries = np.unique(np.ravel(df_top.iloc[:, ::2]))
+    imgs = []
     for entry in uniq_entries:
         ft = torch.load(db_path / f"{entry:04}.pt")
-        img = np.array(ift_and_shift(ft, dim=(1, 2)).real)
+        imgs.append(ift_and_shift(ft, dim=(1, 2)))
+    max_size = np.max([img.shape for img in imgs], axis=0)
+    for img in imgs:
+        img = np.array(pad_to(img, max_size)).real
         v.add_image(img, name=entry)
 
     napari.run()
