@@ -140,7 +140,7 @@ def rotated_projection_fts(ft):
 def crop_to(img, target_shape, dim=None):
     if dim is None:
         dim = tuple(range(img.ndim))
-    edge_crop = ((np.array(img.shape) - np.array(target_shape)) / 2)
+    edge_crop = (np.array(img.shape) - np.array(target_shape)) / 2
     crop_left = tuple(
         floor(edge_crop[d]) or None if d in dim else None for d in range(img.ndim)
     )
@@ -156,7 +156,7 @@ def crop_to(img, target_shape, dim=None):
 def pad_to(img, target_shape, dim=None):
     if dim is None:
         dim = tuple(range(img.ndim))
-    edge_pad = ((np.array(target_shape) - np.array(img.shape)) / 2)
+    edge_pad = (np.array(target_shape) - np.array(img.shape)) / 2
     pad_left = tuple(floor(edge_pad[d]) if d in dim else 0 for d in range(img.ndim))
     pad_right = tuple(ceil(edge_pad[d]) if d in dim else 0 for d in range(img.ndim))
     padding = tuple(chain.from_iterable(zip(pad_right, pad_left, strict=True)))[::-1]
@@ -224,42 +224,36 @@ def correlate_rotations(img_ft, proj_fts, angle_step=5):
 
 def compute_cc(class_data, entry_path, device=None):
     corr_values = {}
-    with torch.cuda.device(device):
-        torch.set_default_tensor_type(torch.cuda.FloatTensor)
+    entry_data = torch.load(entry_path, map_location=device)
 
-        entry_data = torch.load(entry_path, map_location=device)
+    # crop/pad in real space to match target shape
+    class_data = resize(class_data, entry_data.shape, dim=(1, 2))
+    # go back to ft
+    class_ft = ft_and_shift(class_data, dim=(1, 2))
+    del class_data
 
-        # crop/pad in real space to match target shape
-        class_data = resize(class_data, entry_data.shape, dim=(1, 2))
-        # go back to ft
-        class_ft = ft_and_shift(class_data, dim=(1, 2))
-        del class_data
-
-        for cls_idx, cls in enumerate(class_ft):
-            ccs = correlate_rotations(cls, entry_data)
-            corr_values[cls_idx] = ccs.max().item()
-            del ccs
-        del entry_data
+    for cls_idx, cls in enumerate(class_ft):
+        ccs = correlate_rotations(cls, entry_data)
+        corr_values[cls_idx] = ccs.max().item()
+        del ccs
+    del entry_data
     return corr_values
 
 
 def load_class_data(cls_path, device=None):
-    with torch.cuda.device(device):
-        torch.set_default_tensor_type(torch.cuda.FloatTensor)
+    with mrcfile.mmap(cls_path) as mrc:
+        class_data = torch.tensor(mrc.data, device=device)
+        class_px_size = mrc.voxel_size.x.item()
 
-        with mrcfile.mmap(cls_path) as mrc:
-            class_data = torch.tensor(mrc.data)
-            class_px_size = mrc.voxel_size.x.item()
+    class_data = normalize(coerce_ndim(class_data, 3), dim=(1, 2))
 
-        class_data = normalize(coerce_ndim(class_data, 3), dim=(1, 2))
-
-        # crop/pad ft to match pixel size
-        class_ft = ft_and_shift(class_data, dim=(1, 2))
-        class_ft = crop_or_pad_from_px_sizes(
-            class_ft, class_px_size, BIN_RESOLUTION, dim=(1, 2)
-        )
-        class_data = ift_and_shift(class_ft, dim=(1, 2))
-        del class_ft
+    # crop/pad ft to match pixel size
+    class_ft = ft_and_shift(class_data, dim=(1, 2))
+    class_ft = crop_or_pad_from_px_sizes(
+        class_ft, class_px_size, BIN_RESOLUTION, dim=(1, 2)
+    )
+    class_data = ift_and_shift(class_ft, dim=(1, 2))
+    del class_ft
     return class_data
 
 

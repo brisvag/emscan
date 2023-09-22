@@ -181,7 +181,7 @@ def scan(
         with ProcessPoolExecutor(max_workers=devices) as pool:
             # pre-load class data for each gpu
             cls_data = {
-                device: load_class_data(classes, device=device)
+                device: load_class_data(classes, device=f"cuda:{device}")
                 for device in range(devices)
             }
 
@@ -218,8 +218,14 @@ def scan(
 )
 @click.option("-g", "--class-group", multiple=True, type=str)
 @click.option("-n", "--top-n", default=30, type=int, help="How many top hits to show.")
+@click.option(
+    "-c",
+    "--class-image",
+    type=click.Path(exists=True, dir_okay=False, resolve_path=True),
+    help="Image that was used for the correlation.",
+)
 @click.pass_context
-def show(ctx, correlation_results, class_group, top_n):
+def show(ctx, correlation_results, class_group, top_n, class_image):
     """Parse correlation results and show related emdb entries and plots."""
     import napari
     import numpy as np
@@ -227,17 +233,16 @@ def show(ctx, correlation_results, class_group, top_n):
     import torch
     from rich import print
 
-    from emscan._functions import ift_and_shift, pad_to
+    from emscan._functions import ift_and_shift, load_class_data, pad_to
 
     db_path = ctx.obj["db_path"]
     ctx.obj["overwrite"]
-    # log = ctx.obj['log']
 
     df = pd.read_csv(correlation_results, sep="\t", index_col="entry")
 
     for group in class_group:
         cols = group.split(",")
-        best = df[cols].max(axis=1)
+        best = df[cols].mean(axis=1)
         df = df.drop(columns=cols)
         df[group] = best
 
@@ -250,19 +255,29 @@ def show(ctx, correlation_results, class_group, top_n):
 
     print(df_top)
     v = napari.Viewer()
-    v.grid.enabled = True
-    v.grid.stride = -1
 
-    uniq_entries = np.unique(np.ravel(df_top.iloc[:, ::2]))
+    if df.shape[1] == 1:
+        # preserve order
+        uniq_entries = pd.unique(df_top.iloc[:, 0])
+    else:
+        uniq_entries = np.unique(np.ravel(df_top.iloc[:, ::2]))
+
     imgs = {}
+    if class_image is not None:
+        classes_data = load_class_data(class_image, device="cpu")
+        for i, d in enumerate(classes_data):
+            imgs[f"class {i}"] = d[None]
     for entry in uniq_entries:
         ft = torch.load(db_path / f"{entry:04}.pt")
         imgs[entry] = ift_and_shift(ft, dim=(1, 2))
-    max_size = np.max([img.shape for img in imgs], axis=0)
+    max_size = np.max([img.shape for img in imgs.values()], axis=0)
     for entry, img in imgs.items():
-        img = np.array(pad_to(img, max_size)).real
+        img = np.array(pad_to(img, max_size, dim=(1, 2))).real.squeeze()
         v.add_image(img, name=entry)
 
+    v.grid.enabled = True
+    v.grid.shape = (-1, len(classes_data))
+    v.grid.stride = -1
     napari.run()
 
 
