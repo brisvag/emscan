@@ -140,7 +140,7 @@ def rotated_projection_fts(ft):
 def crop_to(img, target_shape, dim=None):
     if dim is None:
         dim = tuple(range(img.ndim))
-    edge_crop = ((np.array(img.shape) - np.array(target_shape)) / 2).astype(int)
+    edge_crop = ((np.array(img.shape) - np.array(target_shape)) / 2)
     crop_left = tuple(
         floor(edge_crop[d]) or None if d in dim else None for d in range(img.ndim)
     )
@@ -156,11 +156,12 @@ def crop_to(img, target_shape, dim=None):
 def pad_to(img, target_shape, dim=None):
     if dim is None:
         dim = tuple(range(img.ndim))
-    edge_pad = ((np.array(target_shape) - np.array(img.shape)) / 2).astype(int)
+    edge_pad = ((np.array(target_shape) - np.array(img.shape)) / 2)
     pad_left = tuple(floor(edge_pad[d]) if d in dim else 0 for d in range(img.ndim))
     pad_right = tuple(ceil(edge_pad[d]) if d in dim else 0 for d in range(img.ndim))
     padding = tuple(chain.from_iterable(zip(pad_right, pad_left, strict=True)))[::-1]
-    return torch.nn.functional.pad(img, padding)
+    padded = torch.nn.functional.pad(img, padding)
+    return padded
 
 
 def resize(ft, target_shape, dim=None):
