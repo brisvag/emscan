@@ -137,13 +137,13 @@ def scan(
     output,
 ):
     """Find emdb entries similar to the given 2D classes."""
+    from concurrent.futures import ProcessPoolExecutor, as_completed
     from pathlib import Path
-    from time import sleep
 
     import pandas as pd
     import torch
     from rich.progress import Progress
-    from torch.multiprocessing import Pool, set_start_method
+    from torch.multiprocessing import set_start_method
 
     from emscan._functions import (
         compute_cc,
@@ -155,45 +155,60 @@ def scan(
     log = ctx.obj["log"]
     output = Path(output).expanduser().resolve()
 
-    if output.exists() and not overwrite:
-        raise click.UsageError("Output already exists. Pass -f to overwrite.")
-
     entries = sorted(db_path.glob("*.pt"))
+
+    add_header = True
+    exist = []
+    if output.exists():
+        if overwrite:
+            log.warn(f"{output.name} exists and will be overwritten.")
+        else:
+            exist = pd.read_csv(output, sep="\t", index_col=0).index
+            log.warn(
+                f"{output.name} already esists: ({len(exist)}/{len(entries)}) entries already processed."
+            )
+
+            entries = [entry for entry in entries if int(entry.stem) not in exist]
+            add_header = False
 
     set_start_method("spawn", force=True)
     devices = torch.cuda.device_count()
 
+    errors = []
     with Progress() as prog:
-        task = prog.add_task(description="Correlating...")
-        with Pool(processes=devices) as pool:
+        task = prog.add_task(description="Correlating...", total=len(entries))
+        # with Pool(processes=devices) as pool:
+        with ProcessPoolExecutor(max_workers=devices) as pool:
             # pre-load class data for each gpu
             cls_data = {
                 device: load_class_data(classes, device=device)
                 for device in range(devices)
             }
 
-            results = [
-                pool.apply_async(
+            futures = {
+                pool.submit(
                     compute_cc,
-                    (cls_data[(device := idx % devices)], entry, f"cuda:{device}"),
-                )
+                    cls_data[(device := idx % devices)],
+                    entry,
+                    f"cuda:{device}",
+                ): entry
                 for idx, entry in enumerate(entries)
-            ]
-            corr_values = {}
-            while len(results):
-                sleep(0.1)
-                for res in tuple(results):
-                    if res.ready():
-                        entry_path, cc_dict = res.get()
-                        for cls_idx, cc in cc_dict.items():
-                            corr_values.setdefault(cls_idx, {})[entry_path.stem] = cc
-                        log.info(f"finished correlating to {entry_path.stem}: {cc=}")
-                        prog.update(task, advance=100 / len(entries))
-                        results.pop(results.index(res))
+            }
+            for fut in as_completed(futures):
+                entry_id = futures[fut].stem
+                if fut.exception():
+                    errors.append(fut.exception())
+                    log.warn(f"failed correlating {entry_id}")
+                else:
+                    cc_dict = fut.result()
+                    log.info(f"finished correlating to {entry_id}")
+                    df = pd.DataFrame(cc_dict, index=pd.Index([entry_id], name="entry"))
+                    df.to_csv(output, sep="\t", header=add_header, index=True, mode="a")
+                    add_header = False  # so we only add once
+                prog.update(task, advance=1)
 
-    df = pd.DataFrame(corr_values)
-    df.index.name = "entry"
-    df.to_csv(output, sep="\t")
+    if errors:
+        raise ExceptionGroup("Some correlations failed", errors)
 
 
 @cli.command()
@@ -236,14 +251,15 @@ def show(ctx, correlation_results, class_group, top_n):
     print(df_top)
     v = napari.Viewer()
     v.grid.enabled = True
+    v.grid.stride = -1
 
     uniq_entries = np.unique(np.ravel(df_top.iloc[:, ::2]))
-    imgs = []
+    imgs = {}
     for entry in uniq_entries:
         ft = torch.load(db_path / f"{entry:04}.pt")
-        imgs.append(ift_and_shift(ft, dim=(1, 2)))
+        imgs[entry] = ift_and_shift(ft, dim=(1, 2))
     max_size = np.max([img.shape for img in imgs], axis=0)
-    for img in imgs:
+    for entry, img in imgs.items():
         img = np.array(pad_to(img, max_size)).real
         v.add_image(img, name=entry)
 

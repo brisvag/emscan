@@ -14,7 +14,6 @@ import pandas as pd
 import sh
 import torch
 import xmltodict
-from exceptiongroup import ExceptionGroup
 from morphosamplers.sampler import sample_subvolumes
 from rich import print
 from scipy.spatial.transform import Rotation
@@ -148,7 +147,9 @@ def crop_to(img, target_shape, dim=None):
     crop_right = tuple(
         -ceil(edge_crop[d]) or None if d in dim else None for d in range(img.ndim)
     )
-    crop_slice = tuple(slice(*crops) for crops in zip(crop_left, crop_right))
+    crop_slice = tuple(
+        slice(*crops) for crops in zip(crop_left, crop_right, strict=True)
+    )
     return img[crop_slice]
 
 
@@ -158,7 +159,7 @@ def pad_to(img, target_shape, dim=None):
     edge_pad = ((np.array(target_shape) - np.array(img.shape)) / 2).astype(int)
     pad_left = tuple(floor(edge_pad[d]) if d in dim else 0 for d in range(img.ndim))
     pad_right = tuple(ceil(edge_pad[d]) if d in dim else 0 for d in range(img.ndim))
-    padding = tuple(chain.from_iterable(zip(pad_right, pad_left)))[::-1]
+    padding = tuple(chain.from_iterable(zip(pad_right, pad_left, strict=True)))[::-1]
     return torch.nn.functional.pad(img, padding)
 
 
@@ -238,7 +239,7 @@ def compute_cc(class_data, entry_path, device=None):
             corr_values[cls_idx] = ccs.max().item()
             del ccs
         del entry_data
-    return entry_path, corr_values
+    return corr_values
 
 
 def load_class_data(cls_path, device=None):
@@ -440,7 +441,7 @@ def project_maps(prog, db_path, overwrite, log, dry_run):
     set_start_method("spawn", force=True)
 
     # single-threaded for testing
-    for m, p in zip(maps, projections):
+    for m, p in zip(maps, projections, strict=True):
         errors = []
         try:
             _project_map(m, p)
@@ -455,7 +456,7 @@ def project_maps(prog, db_path, overwrite, log, dry_run):
 
     # with Pool(processes=os.cpu_count() // 2, initializer=os.nice, initargs=(10,)) as pool:
     #     results = [
-    #         pool.apply_async(_project_map, (m, p)) for m, p in zip(maps, projections)
+    #         pool.apply_async(_project_map, (m, p)) for m, p in zip(maps, projections, strict=True)
     #     ]
     #     while len(results):
     #         sleep(0.1)
