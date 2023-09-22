@@ -1,26 +1,25 @@
 import gc
 import inspect
-import os
 import re
-from functools import partial, reduce
+from functools import partial
 from itertools import chain
 from math import ceil, floor
-from operator import mul
+from pathlib import Path
 from threading import Semaphore
-from time import sleep
 
 import healpy
 import mrcfile
 import numpy as np
+import pandas as pd
 import sh
 import torch
 import xmltodict
+from exceptiongroup import ExceptionGroup
 from morphosamplers.sampler import sample_subvolumes
 from rich import print
-from scipy.signal.windows import gaussian
 from scipy.spatial.transform import Rotation
 from torch.fft import fftn, fftshift, ifftn, ifftshift
-from torch.multiprocessing import Pool, set_start_method
+from torch.multiprocessing import set_start_method
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms.functional import rotate
 
@@ -130,7 +129,7 @@ def rotated_projection_fts(ft):
     angles = healpy.pix2ang(nside, np.arange(npix // 2))
     angles = np.stack(angles).T
     rot = Rotation.from_euler("xz", angles)
-    pos = np.array(ft.shape) / 2
+    pos = np.array(ft.shape) // 2  # // needed to center ctf for odd images
     grid_size = (ft.shape[0], ft.shape[0], 1)
     slices = sample_subvolumes(
         np.array(ft), positions=pos, orientations=rot, grid_shape=grid_size
@@ -139,22 +138,17 @@ def rotated_projection_fts(ft):
     return torch.from_numpy(slices)
 
 
-def gaussian_window(shape, sigmas=1, device=None):
-    """Generate a gaussian_window of the given shape and sigmas."""
-    sigmas = np.broadcast_to(sigmas, len(shape))
-    windows = [gaussian(n, s) for n, s in zip(shape, sigmas)]
-    tensors = [torch.tensor(w, device=device) for w in np.ix_(*windows)]
-    return reduce(mul, tensors)
-
-
 def crop_to(img, target_shape, dim=None):
     if dim is None:
         dim = tuple(range(img.ndim))
-    edge_crop = ((np.array(img.shape) - np.array(target_shape)) // 2).astype(int)
-    crop_slice = tuple(
-        slice(edge_crop[d], -edge_crop[d]) if d in dim else slice(None)
-        for d in range(img.ndim)
+    edge_crop = ((np.array(img.shape) - np.array(target_shape)) / 2).astype(int)
+    crop_left = tuple(
+        floor(edge_crop[d]) or None if d in dim else None for d in range(img.ndim)
     )
+    crop_right = tuple(
+        -ceil(edge_crop[d]) or None if d in dim else None for d in range(img.ndim)
+    )
+    crop_slice = tuple(slice(*crops) for crops in zip(crop_left, crop_right))
     return img[crop_slice]
 
 
@@ -175,16 +169,13 @@ def resize(ft, target_shape, dim=None):
 
     target_shape = np.array(target_shape)
     input_shape = np.array(ft.shape)
-    if np.all(target_shape[list(dim)] == input_shape[list(dim)]):
+    target_shape_dims = target_shape[list(dim)]
+    input_shape_dims = input_shape[list(dim)]
+    if np.all(target_shape_dims == input_shape_dims):
         return ft
-    elif np.all(target_shape < ft.shape):
-        ft_resized = crop_to(ft, target_shape, dim=dim)
-        # needed for edge artifacts
-        cropped_shape = np.array(ft_resized.shape)
-        window = gaussian_window(cropped_shape, cropped_shape / 3)
-        ft_resized *= window
-        return ft_resized
-    elif np.all(target_shape > ft.shape):
+    elif np.all(target_shape_dims < input_shape_dims):
+        return crop_to(ft, target_shape, dim=dim)
+    elif np.all(target_shape_dims > input_shape_dims):
         return pad_to(ft, target_shape, dim=dim)
     else:
         raise NotImplementedError("cannot pad and crop at the same time")
@@ -195,8 +186,6 @@ def crop_or_pad_from_px_sizes(ft, px_size_in, px_size_out, dim=None):
     ratio = np.array(px_size_in) / np.array(px_size_out)
     target_shape = np.round(np.array(ft.shape) * ratio / 2) * 2
     dim = tuple(range(ft.ndim)) if dim is None else dim
-    if np.allclose(np.array(ft.shape)[list(dim)], np.array(target_shape)[list(dim)]):
-        return ft
     return resize(ft, target_shape, dim=dim)
 
 
@@ -303,7 +292,9 @@ def get_valid_entries(prog, db_path, log):
     entries = sorted(db_path.glob("emd-*.xml"))
     task = prog.add_task(description="Getting list of maps...", total=len(entries))
     to_download = []
-    skipped = 0
+    too_big_or_small = 0
+    too_heavy = 0
+    non_square = 0
     for entry_xml in entries:
         prog.update(task, advance=1)
         entry_id = re.search(r"emd-(\d+)", entry_xml.stem).group(1)
@@ -322,23 +313,33 @@ def get_valid_entries(prog, db_path, log):
         )
         size_mb = float(entry_metadata["emd"]["map"]["@size_kbytes"]) / 1e3
         volume_nm = np.prod(np.array(shape) * px_size) / 1e3  # nm^3
-        if volume_nm > 3e6 or size_mb > 300:
-            # rule of thumb: too big to be worth working with
-            # 300MB is above the 80 percentile, 3e6 above 95, so we keep vast majority
-            # but we save a lot of bandwidth
-            log.info(
-                f"{entry_id} is too big ({volume_nm:.2} nm^3, {int(size_mb)} MB), skipping"
-            )
-            skipped += 1
-            # if proj_path.exists():
-            #     proj_path.unlink()
+        proj_path = db_path / f"{entry_id}.pt"
+        map_path = db_path / f"emd_{entry_id}.map"
+        gz_path = db_path / f"emd_{entry_id}.map.gz"
+        if volume_nm > 3e6 or volume_nm < 1e3:
+            # rule of thumb: too big or small to be worth working with
+            # discarding less than 5%, so should be good, but we save a lot of issues and bandwidth
+            log.info(f"{entry_id} is too big or small ({volume_nm:.2} nm^3), skipping")
+            too_big_or_small += 1
+            proj_path.unlink(missing_ok=True)
+            map_path.unlink(missing_ok=True)
+            gz_path.unlink(missing_ok=True)
+            continue
+        if size_mb > 300:
+            # 300MB is above the 83 percentile (could reduce maybe, but good start)
+            log.info(f"{entry_id}'s file is too heavy ({int(size_mb)} MB), skipping")
+            too_heavy += 1
+            proj_path.unlink(missing_ok=True)
+            map_path.unlink(missing_ok=True)
+            gz_path.unlink(missing_ok=True)
             continue
         if not np.allclose(shape, shape[0]):
             # only deal with square for now (> 93% of entries)
             log.info(f"{entry_id} is not square {shape}, skipping")
-            skipped += 1
-            # if proj_path.exists():
-            #     proj_path.unlink()
+            non_square += 1
+            proj_path.unlink(missing_ok=True)
+            map_path.unlink(missing_ok=True)
+            gz_path.unlink(missing_ok=True)
             continue
 
         img_path = db_path / f"emd_{entry_id}.map"
@@ -351,7 +352,9 @@ def get_valid_entries(prog, db_path, log):
             to_download.append(entry_id)
 
     log.warn(f"Will download {len(to_download)}")
-    log.warn(f"Skipping {skipped} entries (too big or weird)")
+    log.warn(
+        f"Skipping {too_big_or_small} too big/small, {too_heavy} too heavy, and {non_square} non-square entries)"
+    )
     return to_download
 
 
@@ -414,15 +417,21 @@ def _project_map(map_path, proj_path):
 def project_maps(prog, db_path, overwrite, log, dry_run):
     maps = []
     projections = []
+    exist = 0
     for m in db_path.glob("*.map"):
         proj = db_path / (re.search(r"\d+", m.stem).group() + ".pt")
         if not overwrite and proj.exists():
+            exist += 1
             continue
         maps.append(m)
         projections.append(proj)
 
     if dry_run:
-        print(f"Will project {len(maps)} maps")
+        print(
+            f"Will project {len(maps)} maps" + ""
+            if overwrite
+            else f", skipping {exist} already existing."
+        )
         return
 
     task = prog.add_task(description="Projecting...", total=len(maps))
@@ -430,15 +439,54 @@ def project_maps(prog, db_path, overwrite, log, dry_run):
     torch.set_default_tensor_type(torch.FloatTensor)
     set_start_method("spawn", force=True)
 
-    with Pool(processes=os.cpu_count() // 2) as pool:
-        results = [
-            pool.apply_async(_project_map, (m, p)) for m, p in zip(maps, projections)
-        ]
-        while len(results):
-            sleep(0.1)
-            for res in tuple(results):
-                if res.ready():
-                    proj_path = res.get()
-                    log.info(f"finished projecting {proj_path.stem}")
-                    prog.update(task, advance=1)
-                    results.pop(results.index(res))
+    # single-threaded for testing
+    for m, p in zip(maps, projections):
+        errors = []
+        try:
+            _project_map(m, p)
+            log.info(f"finished projecting {p.stem}")
+        except Exception as e:
+            e.add_note(m.stem)
+            errors.append(e)
+            log.warn(f"failed projecting {p.stem}")
+        prog.update(task, advance=1)
+    if errors:
+        raise ExceptionGroup("Some projections failed", errors)
+
+    # with Pool(processes=os.cpu_count() // 2, initializer=os.nice, initargs=(10,)) as pool:
+    #     results = [
+    #         pool.apply_async(_project_map, (m, p)) for m, p in zip(maps, projections)
+    #     ]
+    #     while len(results):
+    #         sleep(0.1)
+    #         for res in tuple(results):
+    #             if res.ready():
+    #                 proj_path = res.get()
+    #                 log.info(f"finished projecting {proj_path.stem}")
+    #                 prog.update(task, advance=1)
+    #                 results.pop(results.index(res))
+    #
+
+
+def _parse_headers(db_path):
+    df = pd.DataFrame(columns=["x", "y", "z", "px_x", "px_y", "px_z", "size_kb"])
+    df.astype(
+        {
+            "x": int,
+            "y": int,
+            "z": int,
+            "px_x": float,
+            "px_y": float,
+            "px_z": float,
+            "size_kb": int,
+        }
+    )
+    for xml in Path(db_path).glob("*.xml"):
+        with open(xml, "rb") as f:
+            data = xmltodict.parse(f)
+        entry_id = int(re.search(r"emd-(\d+)", xml.stem).group(1))
+        shape = [int(i) for i in data["emd"]["map"]["dimensions"].values()]
+        px = [float(v["#text"]) for v in data["emd"]["map"]["pixel_spacing"].values()]
+        size = int(data["emd"]["map"]["@size_kbytes"])
+        df.loc[entry_id] = [*shape, *px, size]
+    return df

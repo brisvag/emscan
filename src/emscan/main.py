@@ -152,7 +152,7 @@ def scan(
 
     db_path = ctx.obj["db_path"]
     overwrite = ctx.obj["overwrite"]
-    # log = ctx.obj['log']
+    log = ctx.obj["log"]
     output = Path(output).expanduser().resolve()
 
     if output.exists() and not overwrite:
@@ -187,6 +187,7 @@ def scan(
                         entry_path, cc_dict = res.get()
                         for cls_idx, cc in cc_dict.items():
                             corr_values.setdefault(cls_idx, {})[entry_path.stem] = cc
+                        log.info(f"finished correlating to {entry_path.stem}: {cc=}")
                         prog.update(task, advance=100 / len(entries))
                         results.pop(results.index(res))
 
@@ -201,8 +202,9 @@ def scan(
     type=click.Path(exists=True, dir_okay=False, resolve_path=True),
 )
 @click.option("-g", "--class-group", multiple=True, type=str)
+@click.option("-n", "--top-n", default=30, type=int, help="How many top hits to show.")
 @click.pass_context
-def show(ctx, correlation_results, class_group):
+def show(ctx, correlation_results, class_group, top_n):
     """Parse correlation results and show related emdb entries and plots."""
     import napari
     import numpy as np
@@ -227,9 +229,9 @@ def show(ctx, correlation_results, class_group):
     df_top = pd.DataFrame()
     df_top.index.name = "rank"
     for col in df:
-        top_10_idx = df[col].sort_values()[::-1].index[:10]
-        top_10 = df[col].loc[top_10_idx].reset_index()
-        df_top[[f"{col}_entry", f"{col}_cc"]] = top_10
+        top_n_idx = df[col].sort_values()[::-1].index[:top_n]
+        top_n_entries = df[col].loc[top_n_idx].reset_index()
+        df_top[[f"{col}_entry", f"{col}_cc"]] = top_n_entries
 
     print(df_top)
     v = napari.Viewer()
