@@ -436,8 +436,8 @@ def project_maps(prog, db_path, overwrite, log, dry_run):
     set_start_method("spawn", force=True)
 
     # single-threaded for testing
+    errors = []
     for m, p in zip(maps, projections, strict=True):
-        errors = []
         try:
             _project_map(m, p)
             log.info(f"finished projecting {p.stem}")

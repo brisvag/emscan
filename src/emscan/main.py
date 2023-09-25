@@ -126,9 +126,8 @@ def gen_db(
 @click.option(
     "-o",
     "--output",
-    default="./output.csv",
     type=click.Path(dir_okay=False, file_okay=True),
-    help="Output json file with the cc data",
+    help="Output json file with the cc data. [default: <CLASSES_NAME>.csv]",
 )
 @click.pass_context
 def scan(
@@ -153,7 +152,11 @@ def scan(
     db_path = ctx.obj["db_path"]
     overwrite = ctx.obj["overwrite"]
     log = ctx.obj["log"]
-    output = Path(output).expanduser().resolve()
+
+    if output is None:
+        output = Path(classes).with_suffix(".csv")
+    else:
+        output = Path(output).expanduser().resolve()
 
     entries = sorted(db_path.glob("*.pt"))
 
@@ -216,7 +219,14 @@ def scan(
     "correlation_results",
     type=click.Path(exists=True, dir_okay=False, resolve_path=True),
 )
-@click.option("-g", "--class-group", multiple=True, type=str)
+@click.option(
+    "-g",
+    "--class-group",
+    default=("all",),
+    multiple=True,
+    type=str,
+    help='comma separated list of indices, or "all".',
+)
 @click.option("-n", "--top-n", default=30, type=int, help="How many top hits to show.")
 @click.option(
     "-c",
@@ -240,11 +250,15 @@ def show(ctx, correlation_results, class_group, top_n, class_image):
 
     df = pd.read_csv(correlation_results, sep="\t", index_col="entry")
 
-    for group in class_group:
-        cols = group.split(",")
-        best = df[cols].mean(axis=1)
-        df = df.drop(columns=cols)
-        df[group] = best
+    if class_group == ("all",):
+        mean = df.mean(axis=1)
+        df = pd.DataFrame({"all": mean})
+    else:
+        for group in class_group:
+            cols = group.split(",")
+            mean = df[cols].mean(axis=1)
+            df = df.drop(columns=cols)
+            df[group] = mean
 
     df_top = pd.DataFrame()
     df_top.index.name = "rank"
@@ -276,7 +290,6 @@ def show(ctx, correlation_results, class_group, top_n, class_image):
         v.add_image(img, name=entry)
 
     v.grid.enabled = True
-    v.grid.shape = (-1, len(classes_data))
     v.grid.stride = -1
     napari.run()
 
