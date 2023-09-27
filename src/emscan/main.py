@@ -222,10 +222,9 @@ def scan(
 @click.option(
     "-g",
     "--class-group",
-    default=("all",),
     multiple=True,
     type=str,
-    help='comma separated list of indices, or "all".',
+    help="comma separated list of indices to use and group. All if empty.",
 )
 @click.option("-n", "--top-n", default=30, type=int, help="How many top hits to show.")
 @click.option(
@@ -237,9 +236,14 @@ def scan(
 @click.pass_context
 def show(ctx, correlation_results, class_group, top_n, class_image):
     """Parse correlation results and show related emdb entries and plots."""
+    import webbrowser
+    from inspect import cleandoc
+
+    import mrcfile
     import napari
     import numpy as np
     import pandas as pd
+    import plotly.express as px
     import torch
     from rich import print
 
@@ -250,27 +254,31 @@ def show(ctx, correlation_results, class_group, top_n, class_image):
 
     df = pd.read_csv(correlation_results, sep="\t", index_col="entry")
 
-    if class_group == ("all",):
-        mean = df.mean(axis=1)
-        df = pd.DataFrame({"all": mean})
+    df_selected = pd.DataFrame()
+    selected = []
+    if not class_group:
+        df_selected["all"] = df.mean(axis=1)
     else:
         for group in class_group:
             cols = group.split(",")
+            selected.extend([int(c) for c in cols])
             mean = df[cols].mean(axis=1)
-            df = df.drop(columns=cols)
-            df[group] = mean
+            df_selected[group] = mean
+
+    fig = px.histogram(df_selected, x=df_selected.columns, nbins=50)
+    fig.show()
 
     df_top = pd.DataFrame()
     df_top.index.name = "rank"
-    for col in df:
-        top_n_idx = df[col].sort_values()[::-1].index[:top_n]
-        top_n_entries = df[col].loc[top_n_idx].reset_index()
+    for col in df_selected:
+        top_n_idx = df_selected[col].sort_values()[::-1].index[:top_n]
+        top_n_entries = df_selected[col].loc[top_n_idx].reset_index()
         df_top[[f"{col}_entry", f"{col}_cc"]] = top_n_entries
 
     print(df_top)
     v = napari.Viewer()
 
-    if df.shape[1] == 1:
+    if df_selected.shape[1] == 1:
         # preserve order
         uniq_entries = pd.unique(df_top.iloc[:, 0])
     else:
@@ -280,14 +288,65 @@ def show(ctx, correlation_results, class_group, top_n, class_image):
     if class_image is not None:
         classes_data = load_class_data(class_image, device="cpu")
         for i, d in enumerate(classes_data):
-            imgs[f"class {i}"] = d[None]
+            if not selected or i in selected:
+                imgs[f"class {i}"] = d[None]
     for entry in uniq_entries:
         ft = torch.load(db_path / f"{entry:04}.pt")
         imgs[entry] = ift_and_shift(ft, dim=(1, 2))
     max_size = np.max([img.shape for img in imgs.values()], axis=0)
     for entry, img in imgs.items():
         img = np.array(pad_to(img, max_size, dim=(1, 2))).real.squeeze()
-        v.add_image(img, name=entry)
+        v.add_image(img, name=f"{entry:04}", interpolation2d="spline36")
+
+    def get_correct_entry(viewer, event):
+        for lay in reversed(viewer.layers):
+            shift = lay._translate_grid[1:]
+            pos = np.array(event.position)[1:]
+            if np.all(pos >= shift):
+                return lay.name
+        return None
+
+    def open_entry(viewer, event):
+        if event.modifiers:
+            return
+        entry = get_correct_entry(viewer, event)
+        if entry is not None:
+            webbrowser.open(f"https://www.ebi.ac.uk/emdb/EMD-{entry}")
+
+    def make_proj_mrc(viewer, event):
+        if "Control" not in event.modifiers:
+            return
+        entry = get_correct_entry(viewer, event)
+        if entry is not None:
+            filename = f"emdb_{entry}_projections.mrc"
+            with mrcfile.new(filename, data=np.array(imgs[int(entry)]).real) as mrc:
+                mrc.voxel_size = 4
+                mrc.set_image_stack()
+            napari.utils.notifications.show_info(f"Saved projections as {filename}")
+
+    def open_stack(viewer, event):
+        if "Shift" not in event.modifiers:
+            return
+        entry = get_correct_entry(viewer, event)
+        v_ = napari.Viewer()
+        for sl in imgs[int(entry)]:
+            v_.add_image(sl)
+        v_.grid.enabled = True
+
+    print(
+        cleandoc(
+            """
+            TIPS:
+            - double click an image to open its emdb page
+            - ctrl+click to create projection stack
+            - ctrl+shift to open stack exploded in new window
+            """
+        )
+    )
+
+    v.mouse_double_click_callbacks.append(open_entry)
+    v.mouse_drag_callbacks.append(make_proj_mrc)
+    v.mouse_drag_callbacks.append(open_stack)
 
     v.grid.enabled = True
     v.grid.stride = -1
