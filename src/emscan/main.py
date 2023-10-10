@@ -330,7 +330,7 @@ def show(ctx, correlation_results, class_group, top_n, class_image):
         entry = get_correct_entry(viewer, event)
         v_ = napari.Viewer()
         for sl in imgs[int(entry)]:
-            v_.add_image(sl)
+            v_.add_image(np.array(sl.real))
         v_.grid.enabled = True
 
     print(
