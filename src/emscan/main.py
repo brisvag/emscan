@@ -353,5 +353,48 @@ def show(ctx, correlation_results, class_group, top_n, class_image):
     napari.run()
 
 
+@cli.command()
+@click.argument(
+    "entries",
+    nargs=-1,
+    type=str,
+)
+@click.option(
+    "-c",
+    "--class-image",
+    type=click.Path(exists=True, dir_okay=False, resolve_path=True),
+    help="Image to load to compare to.",
+)
+@click.pass_context
+def view_entries(ctx, entries, class_image):
+    """Display projections for the requested entries."""
+    import napari
+    import numpy as np
+    import torch
+
+    from ._functions import ift_and_shift, load_class_data, pad_to
+
+    db_path = ctx.obj["db_path"]
+
+    v = napari.Viewer()
+
+    imgs = {}
+    if class_image is not None:
+        classes_data = load_class_data(class_image, device="cpu")
+        for i, d in enumerate(classes_data):
+            imgs[f"class {i}"] = d[None]
+    for entry in entries:
+        ft = torch.load(db_path / f"{entry:04}.pt")
+        imgs[entry] = ift_and_shift(ft, dim=(1, 2))
+    max_size = np.max([img.shape for img in imgs.values()], axis=0)
+    for entry, img in imgs.items():
+        img = np.array(pad_to(img, max_size, dim=(1, 2))).real.squeeze()
+        v.add_image(img, name=f"{entry:04}", interpolation2d="spline36")
+
+    v.grid.enabled = True
+    v.grid.stride = -1
+    napari.run()
+
+
 if __name__ == "__main__":
     cli()
