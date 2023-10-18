@@ -290,7 +290,6 @@ def get_valid_entries(prog, db_path, log):
     to_download = []
     too_big_or_small = 0
     too_heavy = 0
-    non_square = 0
     for entry_xml in entries:
         prog.update(task, advance=1)
         entry_id = re.search(r"emd-(\d+)", entry_xml.stem).group(1)
@@ -321,18 +320,10 @@ def get_valid_entries(prog, db_path, log):
             map_path.unlink(missing_ok=True)
             gz_path.unlink(missing_ok=True)
             continue
-        if size_mb > 300:
+        if size_mb > 400:
             # 300MB is above the 83 percentile (could reduce maybe, but good start)
             log.info(f"{entry_id}'s file is too heavy ({int(size_mb)} MB), skipping")
             too_heavy += 1
-            proj_path.unlink(missing_ok=True)
-            map_path.unlink(missing_ok=True)
-            gz_path.unlink(missing_ok=True)
-            continue
-        if not np.allclose(shape, shape[0]):
-            # only deal with square for now (> 93% of entries)
-            log.info(f"{entry_id} is not square {shape}, skipping")
-            non_square += 1
             proj_path.unlink(missing_ok=True)
             map_path.unlink(missing_ok=True)
             gz_path.unlink(missing_ok=True)
@@ -348,9 +339,7 @@ def get_valid_entries(prog, db_path, log):
             to_download.append(entry_id)
 
     log.warn(f"Will download {len(to_download)}")
-    log.warn(
-        f"Skipping {too_big_or_small} too big/small, {too_heavy} too heavy, and {non_square} non-square entries)"
-    )
+    log.warn(f"Skipping {too_big_or_small} too big/small and {too_heavy} too heavy)")
     return to_download
 
 
@@ -403,6 +392,9 @@ def _project_map(map_path, proj_path):
         px_size = mrc.voxel_size.x.item()
 
     img = normalize(torch.from_numpy(data))
+    if not np.all(data.shape[0] == np.array(data.shape)):
+        # not square, pad to square before projecting
+        img = pad_to(img, [np.max(data.shape)] * 3)
     ft = crop_or_pad_from_px_sizes(ft_and_shift(img), px_size, BIN_RESOLUTION)
     proj = rotated_projection_fts(ft)
 
