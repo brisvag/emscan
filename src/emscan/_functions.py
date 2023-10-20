@@ -416,9 +416,8 @@ def project_maps(prog, db_path, overwrite, log, dry_run):
 
     if dry_run:
         print(
-            f"Will project {len(maps)} maps" + ""
-            if overwrite
-            else f", skipping {exist} already existing."
+            f"Will project {len(maps)} maps"
+            + ("" if overwrite else f", skipping {exist} already existing.")
         )
         return
 
