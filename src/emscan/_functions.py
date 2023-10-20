@@ -284,12 +284,13 @@ def rsync_with_progress(prog, task_desc, remote_path, local_path, dry_run):
     proc.wait()
 
 
-def get_valid_entries(prog, db_path, log):
+def get_valid_entries(prog, db_path, log, dry_run):
     entries = sorted(db_path.glob("emd-*.xml"))
     task = prog.add_task(description="Getting list of maps...", total=len(entries))
     to_download = []
     too_big_or_small = 0
     too_heavy = 0
+    to_remove = 0
     for entry_xml in entries:
         prog.update(task, advance=1)
         entry_id = re.search(r"emd-(\d+)", entry_xml.stem).group(1)
@@ -306,27 +307,41 @@ def get_valid_entries(prog, db_path, log):
         shape = np.array(
             [int(i) for i in entry_metadata["emd"]["map"]["dimensions"].values()]
         )
+        shape_square = np.array([np.max(shape)] * 3)
+
         size_mb = float(entry_metadata["emd"]["map"]["@size_kbytes"]) / 1e3
-        volume_nm = np.prod(np.array(shape) * px_size) / 1e3  # nm^3
+        # convert shape to square to check for sizes (will have to happen in processing)
+        volume_padded_GB = np.prod(shape_square) * 32 / 1e9
+        volume_nm = np.prod(np.array(shape_square) * px_size) / 1e3  # nm^3
         proj_path = db_path / f"{entry_id}.pt"
         map_path = db_path / f"emd_{entry_id}.map"
         gz_path = db_path / f"emd_{entry_id}.map.gz"
-        if volume_nm > 3e6 or volume_nm < 1e3:
+        if volume_nm > 3e6 or volume_nm < 1e3 or volume_padded_GB > 2:
             # rule of thumb: too big or small to be worth working with
             # discarding less than 5%, so should be good, but we save a lot of issues and bandwidth
             log.info(f"{entry_id} is too big or small ({volume_nm:.2} nm^3), skipping")
             too_big_or_small += 1
-            proj_path.unlink(missing_ok=True)
-            map_path.unlink(missing_ok=True)
-            gz_path.unlink(missing_ok=True)
+            remove = False
+            for pth in (proj_path, map_path, gz_path):
+                if pth.exists():
+                    remove = True
+                    log.info(f"{pth.name} exists and will be removed")
+                if not dry_run:
+                    pth.unlink(missing_ok=True)
+            to_remove += remove
             continue
         if size_mb > 300:
             # 300MB is above the 83 percentile (could reduce maybe, but good start)
             log.info(f"{entry_id}'s file is too heavy ({int(size_mb)} MB), skipping")
             too_heavy += 1
-            proj_path.unlink(missing_ok=True)
-            map_path.unlink(missing_ok=True)
-            gz_path.unlink(missing_ok=True)
+            remove = False
+            for pth in (proj_path, map_path, gz_path):
+                if pth.exists():
+                    remove = True
+                    log.info(f"{pth.name} exists and will be removed")
+                if not dry_run:
+                    pth.unlink(missing_ok=True)
+            to_remove += remove
             continue
 
         img_path = db_path / f"emd_{entry_id}.map"
@@ -338,8 +353,11 @@ def get_valid_entries(prog, db_path, log):
         else:
             to_download.append(entry_id)
 
-    log.warn(f"Will download {len(to_download)}")
-    log.warn(f"Skipping {too_big_or_small} too big/small and {too_heavy} too heavy)")
+    log.warn(f"Will download {len(to_download)}. Will remove {to_remove}.")
+    log.warn(f"Skipping {too_big_or_small} too big/small and {too_heavy} too heavy.)")
+    log.warn(
+        f"Totaling {(len(entries) - too_big_or_small - too_heavy) / len(entries) * 100}% of the emdb."
+    )
     return to_download
 
 
@@ -403,32 +421,38 @@ def _project_map(map_path, proj_path):
 
 
 def project_maps(prog, db_path, overwrite, log, dry_run):
-    maps = []
+    maps = list(db_path.glob("*.map"))
+    task = prog.add_task(
+        description="Checking existing projections...", total=len(maps)
+    )
+
+    maps_to_project = []
     projections = []
     exist = 0
-    for m in db_path.glob("*.map"):
+    for m in maps:
+        prog.update(task, advance=1)
         proj = db_path / (re.search(r"\d+", m.stem).group() + ".pt")
         if not overwrite and proj.exists():
             exist += 1
             continue
-        maps.append(m)
+        maps_to_project.append(m)
         projections.append(proj)
 
     if dry_run:
         print(
-            f"Will project {len(maps)} maps"
+            f"Will project {len(maps_to_project)} maps"
             + ("" if overwrite else f", skipping {exist} already existing.")
         )
         return
 
-    task = prog.add_task(description="Projecting...", total=len(maps))
+    task = prog.add_task(description="Projecting...", total=len(maps_to_project))
 
-    torch.set_default_tensor_type(torch.FloatTensor)
+    torch.set_default_dtype(torch.float32)
     set_start_method("spawn", force=True)
 
     # single-threaded for testing
     errors = []
-    for m, p in zip(maps, projections, strict=True):
+    for m, p in zip(maps_to_project, projections, strict=True):
         try:
             _project_map(m, p)
             log.info(f"finished projecting {p.stem}")

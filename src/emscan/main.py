@@ -103,7 +103,9 @@ def gen_db(
             )
 
         if maps:
-            to_download = get_valid_entries(prog=prog, db_path=db_path, log=log)
+            to_download = get_valid_entries(
+                prog=prog, db_path=db_path, log=log, dry_run=dry_run
+            )
             download_maps(
                 prog=prog, db_path=db_path, to_download=to_download, dry_run=dry_run
             )
