@@ -320,7 +320,7 @@ def get_valid_entries(prog, db_path, log):
             map_path.unlink(missing_ok=True)
             gz_path.unlink(missing_ok=True)
             continue
-        if size_mb > 400:
+        if size_mb > 300:
             # 300MB is above the 83 percentile (could reduce maybe, but good start)
             log.info(f"{entry_id}'s file is too heavy ({int(size_mb)} MB), skipping")
             too_heavy += 1
