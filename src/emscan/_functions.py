@@ -153,14 +153,14 @@ def crop_to(img, target_shape, dim=None):
     return img[crop_slice]
 
 
-def pad_to(img, target_shape, dim=None):
+def pad_to(img, target_shape, dim=None, value=0):
     if dim is None:
         dim = tuple(range(img.ndim))
     edge_pad = (np.array(target_shape) - np.array(img.shape)) / 2
     pad_left = tuple(floor(edge_pad[d]) if d in dim else 0 for d in range(img.ndim))
     pad_right = tuple(ceil(edge_pad[d]) if d in dim else 0 for d in range(img.ndim))
     padding = tuple(chain.from_iterable(zip(pad_right, pad_left, strict=True)))[::-1]
-    padded = torch.nn.functional.pad(img, padding)
+    padded = torch.nn.functional.pad(img, padding, value=value)
     return padded
 
 
@@ -194,7 +194,8 @@ def crop_or_pad_from_px_sizes(ft, px_size_in, px_size_out, dim=None):
 def correlate_rotations(img_ft, proj_fts, angle_step=5):
     """Fast cross correlation of all elements of projections and the image.
 
-    Performs also rotations. Input fts must be fftshifted+fftd+fftshifted.
+    Performs also rotations and mirroring to cover all orientations.
+    Input fts must be fftshifted+fftd+fftshifted.
     """
     shape1 = tuple(img_ft.shape)
     shape2 = tuple(proj_fts.shape[1:])
@@ -210,14 +211,16 @@ def correlate_rotations(img_ft, proj_fts, angle_step=5):
 
     best_ccs = torch.zeros(len(proj_fts), device=proj_fts.device)
     for _, img_ft_rot in rotations(img_ft, range(0, 360, angle_step)):
-        ccs = (
-            torch.abs(
-                ift_and_shift(img_ft_rot[None] * proj_fts.conj(), dim=(1, 2))
-            ).amax(dim=(1, 2))
-            / denoms
-        )
-        best_ccs = torch.amax(torch.stack([ccs, best_ccs]), dim=0)
-        del ccs
+        # also correlate transposed image, because we only have half a sphere of projections
+        for flip in (img_ft_rot, img_ft_rot.T):
+            ccs = (
+                torch.abs(ift_and_shift(flip[None] * proj_fts.conj(), dim=(1, 2))).amax(
+                    dim=(1, 2)
+                )
+                / denoms
+            )
+            best_ccs = torch.amax(torch.stack([ccs, best_ccs]), dim=0)
+            del ccs
     del img_ft, proj_fts
     return best_ccs
 
@@ -316,7 +319,7 @@ def get_valid_entries(prog, db_path, log, dry_run):
         proj_path = db_path / f"{entry_id}.pt"
         map_path = db_path / f"emd_{entry_id}.map"
         gz_path = db_path / f"emd_{entry_id}.map.gz"
-        if volume_nm > 3e6 or volume_nm < 1e3 or volume_padded_GB > 2:
+        if volume_nm > 3e6 or volume_nm < 1e3 or volume_padded_GB > 3:
             # rule of thumb: too big or small to be worth working with
             # discarding less than 5%, so should be good, but we save a lot of issues and bandwidth
             log.info(f"{entry_id} is too big or small ({volume_nm:.2} nm^3), skipping")
@@ -325,12 +328,12 @@ def get_valid_entries(prog, db_path, log, dry_run):
             for pth in (proj_path, map_path, gz_path):
                 if pth.exists():
                     remove = True
-                    log.info(f"{pth.name} exists and will be removed")
+                    log.warn(f"{pth.name} exists and will be removed")
                 if not dry_run:
                     pth.unlink(missing_ok=True)
             to_remove += remove
             continue
-        if size_mb > 300:
+        if size_mb > 400:
             # 300MB is above the 83 percentile (could reduce maybe, but good start)
             log.info(f"{entry_id}'s file is too heavy ({int(size_mb)} MB), skipping")
             too_heavy += 1
@@ -338,7 +341,7 @@ def get_valid_entries(prog, db_path, log, dry_run):
             for pth in (proj_path, map_path, gz_path):
                 if pth.exists():
                     remove = True
-                    log.info(f"{pth.name} exists and will be removed")
+                    log.warn(f"{pth.name} exists and will be removed")
                 if not dry_run:
                     pth.unlink(missing_ok=True)
             to_remove += remove
@@ -354,10 +357,9 @@ def get_valid_entries(prog, db_path, log, dry_run):
             to_download.append(entry_id)
 
     log.warn(f"Will download {len(to_download)}. Will remove {to_remove}.")
-    log.warn(f"Skipping {too_big_or_small} too big/small and {too_heavy} too heavy.)")
-    log.warn(
-        f"Totaling {(len(entries) - too_big_or_small - too_heavy) / len(entries) * 100}% of the emdb."
-    )
+    log.warn(f"Skipping {too_big_or_small} too big/small and {too_heavy} too heavy.")
+    emdb_perc = (len(entries) - too_big_or_small - too_heavy) / len(entries) * 100
+    log.warn(f"Totaling {emdb_perc:.2f}% of the emdb.")
     return to_download
 
 
@@ -413,11 +415,30 @@ def _project_map(map_path, proj_path):
     if not np.all(data.shape[0] == np.array(data.shape)):
         # not square, pad to square before projecting
         img = pad_to(img, [np.max(data.shape)] * 3)
+
     ft = crop_or_pad_from_px_sizes(ft_and_shift(img), px_size, BIN_RESOLUTION)
     proj = rotated_projection_fts(ft)
 
     torch.save(proj, proj_path)
     return proj_path
+
+
+def _project_map_real(map_path, proj_path, overwrite=False):
+    with mrcfile.open(map_path) as mrc:
+        data = mrc.data.astype(np.float32, copy=True)
+        px_size = mrc.voxel_size.x.item()
+
+    img = normalize(torch.from_numpy(data))
+    if not np.all(data.shape[0] == np.array(data.shape)):
+        # not square, pad to square before projecting
+        img = pad_to(img, [np.max(data.shape)] * 3)
+
+    ft = ft_and_shift(img)
+    proj_ft = rotated_projection_fts(ft)
+    proj = np.array(ift_and_shift(proj_ft, dim=(1, 2))).real
+
+    with mrcfile.new(proj_path, proj, overwrite=overwrite) as mrc:
+        mrc.voxel_size = px_size
 
 
 def project_maps(prog, db_path, overwrite, log, dry_run):

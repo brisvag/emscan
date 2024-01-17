@@ -202,7 +202,9 @@ def scan(
             for fut in as_completed(futures):
                 entry_id = futures[fut].stem
                 if fut.exception():
-                    errors.append(fut.exception())
+                    err = fut.exception()
+                    err.add_note(entry_id)
+                    errors.append(err)
                     log.warn(f"failed correlating {entry_id}")
                 else:
                     cc_dict = fut.result()
@@ -396,6 +398,26 @@ def view_entries(ctx, entries, class_image):
     v.grid.enabled = True
     v.grid.stride = -1
     napari.run()
+
+
+@cli.command()
+@click.argument(
+    "map_file",
+    type=click.Path(exists=True, dir_okay=False, resolve_path=True),
+)
+@click.pass_context
+def project(ctx, map_file):
+    """Generate rotated templates from the given map."""
+    from pathlib import Path
+
+    from ._functions import _project_map_real
+
+    overwrite = ctx.obj["overwrite"]
+
+    map_file = Path(map_file)
+    proj = map_file.with_stem(map_file.stem + "_proj")
+
+    _project_map_real(map_file, proj, overwrite=overwrite)
 
 
 if __name__ == "__main__":
