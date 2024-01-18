@@ -1,7 +1,7 @@
 import gc
 import inspect
 import re
-from functools import partial
+from functools import lru_cache, partial
 from itertools import chain
 from math import ceil, floor
 from pathlib import Path
@@ -24,6 +24,7 @@ from torchvision.transforms.functional import rotate
 
 BIN_RESOLUTION = 4
 HEALPIX_ORDER = 2
+GOLDEN_RATIO = (1 + np.sqrt(5)) / 2
 
 
 def _print_tensors(depth=2):
@@ -118,16 +119,36 @@ def coerce_ndim(img, ndim):
     return img
 
 
-def rotated_projection_fts(ft):
-    """Generate rotated projections fts of a map."""
-    # TODO: sinc function to avoid edge artifacts
-
+@lru_cache
+def _rotations_hemisphere_healpix():
     nside = healpy.order2nside(HEALPIX_ORDER)
     npix = healpy.nside2npix(nside)
     # only half the views are needed, cause projection symmetry
     angles = healpy.pix2ang(nside, np.arange(npix // 2))
     angles = np.stack(angles).T
-    rot = Rotation.from_euler("xz", angles)
+    return Rotation.from_euler("xz", angles)
+
+
+@lru_cache
+def _rotations_hemisphere_fibonacci():
+    # http://extremelearning.com.au/how-to-evenly-distribute-points-on-a-
+    # sphere-more-effectively-than-the-canonical-fibonacci-lattice/
+    # Note: not using epsilon we ensure we get the Z axis, which is a common
+    # aligment for maps. Packing is slightly worse, but still better than healpix
+
+    N = 300  # THIS IS FIXED ONCE GENERATED THE DB!
+    i = np.arange(N)[: N // 2]  # only take half cause projection symmetry
+    phi = 2 * np.pi * i / GOLDEN_RATIO
+    theta = np.arccos(1 - 2 * i / (N - 1))
+    angles = np.stack([phi, theta], axis=1)
+    return Rotation.from_euler("ZX", angles)
+
+
+def rotated_projection_fts(ft):
+    """Generate rotated projections fts of a map."""
+    # TODO: sinc function to avoid edge artifacts
+
+    rot = _rotations_hemisphere_fibonacci()
     pos = np.array(ft.shape) // 2  # // needed to center ctf for odd images
     grid_size = (ft.shape[0], ft.shape[0], 1)
     slices = sample_subvolumes(

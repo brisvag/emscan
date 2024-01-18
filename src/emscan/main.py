@@ -343,7 +343,7 @@ def show(ctx, correlation_results, class_group, top_n, class_image):
             TIPS:
             - double click an image to open its emdb page
             - ctrl+click to create projection stack
-            - ctrl+shift to open stack exploded in new window
+            - shift+click to open stack exploded in new window
             """
         )
     )
