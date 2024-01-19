@@ -143,6 +143,7 @@ def scan(
 
     import pandas as pd
     import torch
+    from rich import print
     from rich.progress import Progress
     from torch.multiprocessing import set_start_method
 
@@ -160,6 +161,7 @@ def scan(
     else:
         output = Path(output).expanduser().resolve()
 
+    print("Loading database list...")
     entries = sorted(db_path.glob("*.pt"))
 
     add_header = True
