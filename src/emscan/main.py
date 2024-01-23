@@ -148,7 +148,7 @@ def scan(
     from torch.multiprocessing import set_start_method
 
     from emscan._functions import (
-        compute_cc,
+        compute_ncc,
         load_class_data,
     )
 
@@ -194,7 +194,7 @@ def scan(
 
             futures = {
                 pool.submit(
-                    compute_cc,
+                    compute_ncc,
                     cls_data[(device := idx % devices)],
                     entry,
                     f"cuda:{device}",

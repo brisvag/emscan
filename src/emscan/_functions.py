@@ -94,18 +94,15 @@ def rotations(img, degree_range, center=None):
                 center=center,
                 interpolation=InterpolationMode.BILINEAR,
             )[0]
-            rot = angle, real + (1j * imag)
+            rot = real + (1j * imag)
             del real, imag
         else:
-            rot = (
+            rot = rotate(
+                img[None],
                 angle,
-                rotate(
-                    img[None],
-                    angle,
-                    center=center,
-                    interpolation=InterpolationMode.BILINEAR,
-                )[0],
-            )
+                center=center,
+                interpolation=InterpolationMode.BILINEAR,
+            )[0]
         yield rot
         del rot
 
@@ -212,55 +209,51 @@ def crop_or_pad_from_px_sizes(ft, px_size_in, px_size_out, dim=None):
     return resize(ft, target_shape, dim=dim)
 
 
-def correlate_rotations(img_ft, proj_fts, angle_step=5):
+def compute_ncc(class_data, entry_path, device=None, angle_step=5):
     """Fast cross correlation of all elements of projections and the image.
 
     Performs also rotations and mirroring to cover all orientations.
-    Input fts must be fftshifted+fftd+fftshifted.
+
+    Based on eq (9) from:
+    https://w.imagemagick.org/docs/AcceleratedTemplateMatchingUsingLocalStatisticsAndFourierTransforms.pdf
+    Optimized to reduce operations (FFTs are precomputed and images are pre-normalized).
+    Some stuff is also easier because L[0] and S are forced to have the same shape.
     """
-    shape1 = tuple(img_ft.shape)
-    shape2 = tuple(proj_fts.shape[1:])
-    if not np.allclose(shape1, shape2):
-        raise RuntimeError(
-            f"correlate requires the same shape, got {shape1} and {shape2}"
-        )
-
-    img_autocc = torch.abs(ift_and_shift(img_ft * img_ft.conj()))
-    proj_autocc = torch.abs(ift_and_shift(proj_fts * proj_fts.conj(), dim=(1, 2)))
-    denoms = torch.sqrt(img_autocc.amax()) * torch.sqrt(proj_autocc.amax(dim=(1, 2)))
-    del img_autocc, proj_autocc
-
-    best_ccs = torch.zeros(len(proj_fts), device=proj_fts.device)
-    for _, img_ft_rot in rotations(img_ft, range(0, 360, angle_step)):
-        # also correlate transposed image, because we only have half a sphere of projections
-        for flip in (img_ft_rot, img_ft_rot.T):
-            ccs = (
-                torch.abs(ift_and_shift(flip[None] * proj_fts.conj(), dim=(1, 2))).amax(
-                    dim=(1, 2)
-                )
-                / denoms
-            )
-            best_ccs = torch.amax(torch.stack([ccs, best_ccs]), dim=0)
-            del ccs
-    del img_ft, proj_fts
-    return best_ccs
-
-
-def compute_cc(class_data, entry_path, device=None):
     corr_values = {}
-    entry_data = torch.load(entry_path, map_location=device)
+
+    # see link above for what is L, LL, S, U, and the equation
+    L = torch.load(entry_path, map_location=device)  # this is already an FT!
+    LL = ft_and_shift(ift_and_shift(L, dim=(1, 2))**2, dim=(1, 2))
+    U = ft_and_shift(np.ones_like(L[0]))
 
     # crop/pad in real space to match target shape
-    class_data = resize(class_data, entry_data.shape, dim=(1, 2))
-    # go back to ft
-    class_ft = ft_and_shift(class_data, dim=(1, 2))
-    del class_data
+    class_data = resize(class_data, L.shape, dim=(1, 2))
 
-    for cls_idx, cls in enumerate(class_ft):
-        ccs = correlate_rotations(cls, entry_data)
-        corr_values[cls_idx] = ccs.max().item()
-        del ccs
-    del entry_data
+    def _cc(ft1, ft2):
+        return ift_and_shift(ft1 * ft2.conj(), dim=(1, 2))
+
+    denom = torch.sqrt(L[0].nelement() * _cc(U, LL) - _cc(U, L)**2)
+
+    def ncc(S):
+        nonlocal denom, L
+        # NOTE: this assume S is ft of normalized image (std=1, mean=0)
+        return _cc(S, L) / denom
+
+    for cls_idx, cls in enumerate(class_data):
+        best_ccs = torch.zeros(len(L), device=L.device)
+        for cls_rot in rotations(cls, range(0, 360, angle_step)):
+            # normalize to avoid needing std and mean in ncc calculation
+            cls_rot = normalize(cls_rot)
+            # also correlate transposed image, because we only have half a sphere of projections
+            for cls_flip in (cls_rot, cls_rot.T):
+                S = ft_and_shift(cls_flip)
+                ccs = ncc(S).abs().amax(dim=(1, 2))  # TODO: is abs correct here?
+                best_ccs = torch.amax(torch.stack([ccs, best_ccs]), dim=0)
+                del S, ccs
+            del cls_rot
+        corr_values[cls_idx] = best_ccs.max().item()
+        del cls, best_ccs
+    del L, LL, U, class_data, denom
     return corr_values
 
 
