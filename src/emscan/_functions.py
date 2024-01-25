@@ -245,15 +245,27 @@ def compute_ncc(class_data, entry_path, device=None, angle_step=5):
     # see link above for what is L, LL, S, U, and the equation
     L = torch.load(entry_path, map_location=device)  # this is already an FT!
     LL = ft_and_shift(ift_and_shift(L, dim=(1, 2)) ** 2, dim=(1, 2))
-    U = ft_and_shift(torch.ones_like(L[0], device=device))
+
+    if class_data.shape[-1] < L.shape[-1]:
+        # padding happens
+        U = ft_and_shift(torch.ones_like(class_data[0], device=device))
+        N = class_data[0].nelement()
+    else:
+        # cropping, so assume "same size" of S and L
+        U = ft_and_shift(torch.ones_like(L[0], device=device))
+        N = L[0].nelement()
 
     # crop/pad in real space to match target shape
     class_data = resize(class_data, L.shape, dim=(1, 2))
 
+    if class_data.shape[-1] < L.shape[-1]:
+        # padding happens
+        U = resize(U, L[0].shape, dim=(1, 2))
+
     def _cc(ft1, ft2):
         return ift_and_shift(ft1 * ft2.conj(), dim=(1, 2))
 
-    denom = torch.sqrt(L[0].nelement() * _cc(U, LL) - _cc(U, L) ** 2)
+    denom = torch.sqrt(N * _cc(U, LL) - _cc(U, L) ** 2)
 
     def ncc(S):
         nonlocal denom, L
