@@ -336,7 +336,7 @@ def show(ctx, correlation_results, class_group, top_n, class_image):
         entry = get_correct_entry(viewer, event)
         v_ = napari.Viewer()
         for sl in imgs[int(entry)]:
-            v_.add_image(np.array(sl.real))
+            v_.add_image(np.array(sl.real), interpolation2d="spline36")
         v_.grid.enabled = True
 
     print(

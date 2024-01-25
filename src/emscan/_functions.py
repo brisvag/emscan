@@ -1,9 +1,10 @@
 import gc
 import inspect
 import re
-from functools import lru_cache, partial
+from functools import lru_cache, partial, reduce
 from itertools import chain
 from math import ceil, floor
+from operator import mul
 from pathlib import Path
 from threading import Semaphore
 
@@ -16,6 +17,7 @@ import torch
 import xmltodict
 from morphosamplers.sampler import sample_subvolumes
 from rich import print
+from scipy.signal.windows import gaussian
 from scipy.spatial.transform import Rotation
 from torch.fft import fftn, fftshift, ifftn, ifftshift
 from torch.multiprocessing import set_start_method
@@ -155,15 +157,32 @@ def rotated_projection_fts(ft):
     return torch.from_numpy(slices)
 
 
+def gaussian_window(shape, sigmas=None, device=None):
+    """Generate a gaussian_window of the given shape and sigmas, ensuring it goes to zero."""
+    if sigmas is None:
+        sigmas = np.array(shape)
+    sigmas = np.broadcast_to(sigmas, len(shape))
+    windows = [gaussian(n, s) for n, s in zip(shape, sigmas, strict=True)]
+    mins = np.array([min(w) for w in windows])
+    maxs = np.array([max(w) for w in windows])
+    zero = np.max(mins * maxs.reshape(-1, 1))
+    tensors = [torch.tensor(w, device=device) for w in np.ix_(*windows)]
+    window = reduce(mul, tensors)
+    window -= zero
+    window = np.clip(window, 0, 1)
+    window /= window.max()
+    return window
+
+
 def crop_to(img, target_shape, dim=None):
     if dim is None:
         dim = tuple(range(img.ndim))
     edge_crop = (np.array(img.shape) - np.array(target_shape)) / 2
     crop_left = tuple(
-        floor(edge_crop[d]) or None if d in dim else None for d in range(img.ndim)
+        ceil(edge_crop[d]) or None if d in dim else None for d in range(img.ndim)
     )
     crop_right = tuple(
-        -ceil(edge_crop[d]) or None if d in dim else None for d in range(img.ndim)
+        -floor(edge_crop[d]) or None if d in dim else None for d in range(img.ndim)
     )
     crop_slice = tuple(
         slice(*crops) for crops in zip(crop_left, crop_right, strict=True)
@@ -175,8 +194,8 @@ def pad_to(img, target_shape, dim=None, value=0):
     if dim is None:
         dim = tuple(range(img.ndim))
     edge_pad = (np.array(target_shape) - np.array(img.shape)) / 2
-    pad_left = tuple(floor(edge_pad[d]) if d in dim else 0 for d in range(img.ndim))
-    pad_right = tuple(ceil(edge_pad[d]) if d in dim else 0 for d in range(img.ndim))
+    pad_left = tuple(ceil(edge_pad[d]) if d in dim else 0 for d in range(img.ndim))
+    pad_right = tuple(floor(edge_pad[d]) if d in dim else 0 for d in range(img.ndim))
     padding = tuple(chain.from_iterable(zip(pad_right, pad_left, strict=True)))[::-1]
     padded = torch.nn.functional.pad(img, padding, value=value)
     return padded
@@ -426,11 +445,18 @@ def _project_map(map_path, proj_path):
         px_size = mrc.voxel_size.x.item()
 
     img = normalize(torch.from_numpy(data))
+
+    # apply gaussian window to avoid edge issues
+    img *= gaussian_window(img.shape)
+
+    # pad if needed
     if not np.all(data.shape[0] == np.array(data.shape)):
         # not square, pad to square before projecting
         img = pad_to(img, [np.max(data.shape)] * 3)
 
     ft = crop_or_pad_from_px_sizes(ft_and_shift(img), px_size, BIN_RESOLUTION)
+    # # gaussian filter in fourier space as well to help with rotations and whatnot
+    # ft *= gaussian_window(ft.shape)
     proj = rotated_projection_fts(ft)
 
     torch.save(proj, proj_path)
@@ -443,6 +469,11 @@ def _project_map_real(map_path, proj_path, overwrite=False):
         px_size = mrc.voxel_size.x.item()
 
     img = normalize(torch.from_numpy(data))
+
+    # apply gaussian window to avoid edge issues
+    img *= gaussian_window(img.shape)
+
+    # pad if needed
     if not np.all(data.shape[0] == np.array(data.shape)):
         # not square, pad to square before projecting
         img = pad_to(img, [np.max(data.shape)] * 3)
