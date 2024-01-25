@@ -1,6 +1,8 @@
 import gc
 import inspect
+import os
 import re
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import lru_cache, partial, reduce
 from itertools import chain
 from math import ceil, floor
@@ -516,33 +518,39 @@ def project_maps(prog, db_path, overwrite, log, dry_run):
     torch.set_default_dtype(torch.float32)
     set_start_method("spawn", force=True)
 
-    # single-threaded for testing
-    errors = []
-    for m, p in zip(maps_to_project, projections, strict=True):
-        try:
-            _project_map(m, p)
-            log.info(f"finished projecting {p.stem}")
-        except Exception as e:
-            e.add_note(m.stem)
-            errors.append(e)
-            log.warn(f"failed projecting {p.stem}")
-        prog.update(task, advance=1)
-    if errors:
-        raise ExceptionGroup("Some projections failed", errors)
+    # # single-threaded for testing
+    # errors = []
+    # for m, p in zip(maps_to_project, projections, strict=True):
+    #     try:
+    #         _project_map(m, p)
+    #         log.info(f"finished projecting {p.stem}")
+    #     except Exception as e:
+    #         e.add_note(m.stem)
+    #         errors.append(e)
+    #         log.warn(f"failed projecting {p.stem}")
+    #     prog.update(task, advance=1)
+    # if errors:
+    #     raise ExceptionGroup("Some projections failed", errors)
 
-    # with Pool(processes=os.cpu_count() // 2, initializer=os.nice, initargs=(10,)) as pool:
-    #     results = [
-    #         pool.apply_async(_project_map, (m, p)) for m, p in zip(maps, projections, strict=True)
-    #     ]
-    #     while len(results):
-    #         sleep(0.1)
-    #         for res in tuple(results):
-    #             if res.ready():
-    #                 proj_path = res.get()
-    #                 log.info(f"finished projecting {proj_path.stem}")
-    #                 prog.update(task, advance=1)
-    #                 results.pop(results.index(res))
-    #
+    errors = []
+    with ProcessPoolExecutor(
+        max_workers=os.cpu_count() // 4, initializer=os.nice, initargs=(10,)
+    ) as pool:
+        results = {
+            pool.submit(_project_map, m, p): m
+            for m, p in zip(maps, projections, strict=True)
+        }
+        for fut in as_completed(results):
+            map_file = results[fut]
+            if fut.exception():
+                err = fut.exception()
+                err.add_note(map_file)
+                errors.append(err)
+                log.warn(f"failed projecting {map_file}")
+            else:
+                proj_path = fut.result()
+                log.info(f"finished projecting {proj_path.stem}")
+            prog.update(task, advance=1)
 
 
 def _parse_headers(db_path):
