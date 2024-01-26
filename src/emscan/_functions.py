@@ -69,11 +69,15 @@ def normalize(img, dim=None):
 
 
 def ft_and_shift(img, dim=None):
-    return fftshift(fftn(fftshift(img, dim=dim), dim=dim), dim=dim)
+    # first move the image to be center of the origin (ifftshift), which improves
+    # interpolation artifacts later (ftshift is equivalent to multiplying
+    # with a checkerboard, which messes up interpolation real bad)
+    return fftshift(fftn(ifftshift(img, dim=dim), dim=dim), dim=dim)
 
 
 def ift_and_shift(img, dim=None):
-    return ifftshift(ifftn(ifftshift(img, dim=dim), dim=dim), dim=dim)
+    # undo the above (note the order is inverted)
+    return fftshift(ifftn(ifftshift(img, dim=dim), dim=dim), dim=dim)
 
 
 def rotations(img, degree_range, center=None):
@@ -494,6 +498,7 @@ def _project_map_real(map_path, proj_path, overwrite=False):
 
     ft = ft_and_shift(img)
     proj_ft = rotated_projection_fts(ft)
+    # for posterity: real - and not abs - should be right here!
     proj = np.array(ift_and_shift(proj_ft, dim=(1, 2))).real
 
     with mrcfile.new(proj_path, proj, overwrite=overwrite) as mrc:
