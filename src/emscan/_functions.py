@@ -512,7 +512,7 @@ def project_maps(prog, db_path, overwrite, log, dry_run):
     for m in maps:
         prog.update(task, advance=1)
         proj = db_path / (re.search(r"\d+", m.stem).group() + ".pt")
-        if not overwrite and proj.exists():
+        if proj.exists() and not overwrite:
             exist += 1
             continue
         maps_to_project.append(m)
@@ -550,7 +550,7 @@ def project_maps(prog, db_path, overwrite, log, dry_run):
     ) as pool:
         results = {
             pool.submit(_project_map, m, p): m
-            for m, p in zip(maps, projections, strict=True)
+            for m, p in zip(maps_to_project, projections, strict=True)
         }
         for fut in as_completed(results):
             map_file = results[fut].stem
