@@ -553,7 +553,7 @@ def project_maps(prog, db_path, overwrite, log, dry_run):
             for m, p in zip(maps, projections, strict=True)
         }
         for fut in as_completed(results):
-            map_file = results[fut]
+            map_file = results[fut].stem
             if fut.exception():
                 err = fut.exception()
                 err.add_note(map_file)
