@@ -262,7 +262,7 @@ def compute_ncc(class_data, entry_path, device=None, angle_step=5):
     # crop/pad in real space to match target shape
     class_data = resize(class_data, L.shape, dim=(1, 2))
 
-    if class_data.shape[-1] < L.shape[-1]:
+    if U.shape[-1] < L.shape[-1]:
         # padding happens
         U = resize(U, L[0].shape, dim=(1, 2))
 
