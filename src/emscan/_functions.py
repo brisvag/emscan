@@ -474,18 +474,19 @@ def extract_maps(prog, db_path, dry_run):
 
 def _project_map(map_path, proj_path):
     with mrcfile.open(map_path) as mrc:
-        data = mrc.data.astype(np.float32, copy=True)
+        img = torch.from_numpy(mrc.data.astype(np.float32, copy=True))
         px_size = mrc.voxel_size.x.item()
 
-    img = normalize(torch.from_numpy(data))
-
     # apply gaussian window to avoid edge issues
+    img = normalize(img)
     img *= gaussian_window(img.shape)
 
     # pad if needed
-    if not np.all(data.shape[0] == np.array(data.shape)):
+    if not np.all(img.shape[0] == np.array(img.shape)):
         # not square, pad to square before projecting
-        img = pad_to(img, [np.max(data.shape)] * 3)
+        img = pad_to(img, [np.max(img.shape)] * 3)
+
+    img = normalize(img)
 
     ft = crop_or_pad_from_px_sizes(ft_and_shift(img), px_size, BIN_RESOLUTION)
     # # gaussian filter in fourier space as well to help with rotations and whatnot
@@ -498,18 +499,19 @@ def _project_map(map_path, proj_path):
 
 def _project_map_real(map_path, proj_path, overwrite=False):
     with mrcfile.open(map_path) as mrc:
-        data = mrc.data.astype(np.float32, copy=True)
+        img = torch.from_numpy(mrc.data.astype(np.float32, copy=True))
         px_size = mrc.voxel_size.x.item()
 
-    img = normalize(torch.from_numpy(data))
-
     # apply gaussian window to avoid edge issues
+    img = normalize(img)
     img *= gaussian_window(img.shape)
 
     # pad if needed
-    if not np.all(data.shape[0] == np.array(data.shape)):
+    if not np.all(img.shape[0] == np.array(img.shape)):
         # not square, pad to square before projecting
-        img = pad_to(img, [np.max(data.shape)] * 3)
+        img = pad_to(img, [np.max(img.shape)] * 3)
+
+    img = normalize(img)
 
     ft = ft_and_shift(img)
     proj_ft = rotated_projection_fts(ft)
