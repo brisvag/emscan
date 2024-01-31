@@ -279,7 +279,7 @@ def compute_ncc(class_data, entry_path, device=None, angle_step=5):
 
     if U.shape[-1] < L.shape[-1]:
         # padding happens
-        U = resize(U, L[0].shape, dim=(1, 2))
+        U = resize(U, L[0].shape)
 
     def _cc(ft1, ft2):
         return ift_and_shift(ft1 * ft2.conj(), dim=(1, 2))
