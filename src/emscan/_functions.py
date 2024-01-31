@@ -522,7 +522,7 @@ def _project_map_real(map_path, proj_path, overwrite=False):
         mrc.voxel_size = px_size
 
 
-def project_maps(prog, db_path, overwrite, log, dry_run):
+def project_maps(prog, db_path, overwrite, log, dry_run, threads):
     maps = list(db_path.glob("*.map"))
     task = prog.add_task(
         description="Checking existing projections...", total=len(maps)
@@ -566,9 +566,11 @@ def project_maps(prog, db_path, overwrite, log, dry_run):
     # if errors:
     #     raise ExceptionGroup("Some projections failed", errors)
 
+    threads = threads if threads > 0 else os.cpu_count() // 4
+
     errors = []
     with ProcessPoolExecutor(
-        max_workers=os.cpu_count() // 4, initializer=os.nice, initargs=(10,)
+        max_workers=threads, initializer=os.nice, initargs=(10,)
     ) as pool:
         results = {
             pool.submit(_project_map, m, p): m

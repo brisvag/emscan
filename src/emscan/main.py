@@ -64,12 +64,19 @@ def cli(ctx, db_path, overwrite, verbose, dry_run):
     is_flag=True,
     help="Generate projections for all the available maps.",
 )
+@click.option(
+    "-t",
+    "--threads",
+    default=0,
+    help="How many threads to use for projection. If <= 0, guess a good number.",
+)
 @click.pass_context
 def gen_db(
     ctx,
     list_,
     maps,
     projections,
+    threads,
 ):
     """Generate the projection database."""
     if not list_ and not maps and not projections:
@@ -118,6 +125,7 @@ def gen_db(
                 overwrite=overwrite,
                 log=log,
                 dry_run=dry_run,
+                threads=threads,
             )
 
 
