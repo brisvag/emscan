@@ -175,7 +175,7 @@ def gaussian_window(shape, sigmas=None, device=None):
     tensors = [torch.tensor(w, device=device) for w in np.ix_(*windows)]
     window = reduce(mul, tensors)
     window -= zero
-    window = np.clip(window, 0, 1)
+    window = torch.clip(window, 0, 1)
     window /= window.max()
     return window
 
@@ -249,7 +249,7 @@ def crop_or_pad_from_px_sizes(ft, px_size_in, px_size_out, dim=None):
     return resize(ft, target_shape, dim=dim)
 
 
-def compute_ncc(class_data, entry_path, device=None, angle_step=5):
+def compute_ncc(S, entry_path, device=None, angle_step=5):
     """Fast cross correlation of all elements of projections and the image.
 
     Performs also rotations and mirroring to cover all orientations.
@@ -257,55 +257,58 @@ def compute_ncc(class_data, entry_path, device=None, angle_step=5):
     Based on eq (9) from:
     https://w.imagemagick.org/docs/AcceleratedTemplateMatchingUsingLocalStatisticsAndFourierTransforms.pdf
     Optimized to reduce operations (FFTs are precomputed and images are pre-normalized).
-    Some stuff is also easier because L[0] and S are forced to have the same shape.
+    Some stuff is also easier because L[0] and S are forced to have the same shape if S is big.
     """
     corr_values = {}
 
     # see link above for what is L, LL, S, U, and the equation
-    L = torch.load(entry_path, map_location=device)  # this is already an FT!
-    LL = ft_and_shift(ift_and_shift(L, dim=(1, 2)) ** 2, dim=(1, 2))
+    L = torch.load(entry_path, map_location=device)
+    L_ = ft_and_shift(L, dim=(1, 2))
+    LL_ = ft_and_shift(L**2, dim=(1, 2))
 
-    if class_data.shape[-1] < L.shape[-1]:
+    if S.shape[-1] < L.shape[-1]:
         # padding happens
-        U = ft_and_shift(torch.ones_like(class_data[0], device=device))
-        N = class_data[0].nelement()
+        U_ = ft_and_shift(pad_to(torch.ones_like(S[0], device=device), L[0].shape))
+        N = S[0].nelement()
+        # S should be already normalized (and shoudd not be normalized after padding)
+        S = pad_to(S, L.shape, dim=(1, 2))
     else:
         # cropping, so assume "same size" of S and L
-        U = ft_and_shift(torch.ones_like(L[0], device=device))
+        U_ = ft_and_shift(torch.ones_like(L[0], device=device))
         N = L[0].nelement()
-
-    # crop/pad in real space to match target shape
-    class_data = resize(class_data, L.shape, dim=(1, 2))
-
-    if U.shape[-1] < L.shape[-1]:
-        # padding happens
-        U = resize(U, L[0].shape)
+        S = crop_to(S, L.shape, dim=(1, 2))
+        S = normalize(S, dim=(1, 2))
 
     def _cc(ft1, ft2):
-        return ift_and_shift(ft1 * ft2.conj(), dim=(1, 2))
+        return ift_and_shift(ft1 * ft2.conj(), dim=(1, 2)).real.amax(dim=(1, 2))
 
-    denom = torch.sqrt(N * _cc(U, LL) - _cc(U, L) ** 2)
+    denom = torch.sqrt((N * _cc(U_, LL_)) - (_cc(U_, L_) ** 2))
 
-    def ncc(S):
-        nonlocal denom, L
+    n_proj = len(L)
+
+    del L, LL_, U_
+
+    def ncc(S_):
+        nonlocal denom, L_
         # NOTE: this assume S is ft of normalized image (std=1, mean=0)
-        return _cc(S, L) / denom
+        return _cc(S_, L_) / denom
 
-    for cls_idx, cls in enumerate(class_data):
-        best_ccs = torch.zeros(len(L), device=L.device)
+    for cls_idx, cls in enumerate(S):
+        best_ccs = torch.zeros(n_proj, device=S.device)
+
         for cls_rot in rotations(cls, range(0, 360, angle_step)):
             # normalize to avoid needing std and mean in ncc calculation
             cls_rot = normalize(cls_rot)
             # also correlate transposed image, because we only have half a sphere of projections
             for cls_flip in (cls_rot, cls_rot.T):
-                S = ft_and_shift(cls_flip)
-                ccs = ncc(S).abs().amax(dim=(1, 2))  # TODO: is abs correct here?
+                S_ = ft_and_shift(cls_flip)
+                ccs = ncc(S_)  # TODO: is abs correct here?
                 best_ccs = torch.amax(torch.stack([ccs, best_ccs]), dim=0)
-                del S, ccs
+                del S_, ccs
             del cls_rot
         corr_values[cls_idx] = best_ccs.max().item()
         del cls, best_ccs
-    del L, LL, U, class_data, denom
+    del L_, S, denom
     return corr_values
 
 
@@ -315,13 +318,16 @@ def load_class_data(cls_path, device=None):
         class_px_size = mrc.voxel_size.x.item()
 
     class_data = normalize(coerce_ndim(class_data, 3), dim=(1, 2))
+    class_data *= gaussian_window(class_data.shape[1:], device=device)
+    class_data = normalize(class_data, dim=(1, 2))
 
     # crop/pad ft to match pixel size
     class_ft = ft_and_shift(class_data, dim=(1, 2))
     class_ft = crop_or_pad_from_px_sizes(
         class_ft, class_px_size, BIN_RESOLUTION, dim=(1, 2)
     )
-    class_data = ift_and_shift(class_ft, dim=(1, 2))
+    class_data = ift_and_shift(class_ft, dim=(1, 2)).real
+    class_data = normalize(class_data, dim=(1, 2))
     del class_ft
     return class_data
 
@@ -472,7 +478,7 @@ def extract_maps(prog, db_path, dry_run):
         prog.update(task, advance=1)
 
 
-def _project_map(map_path, proj_path):
+def _project_map(map_path, proj_path, save_as_mrc=False):
     with mrcfile.open(map_path) as mrc:
         img = torch.from_numpy(mrc.data.astype(np.float32, copy=True))
         px_size = mrc.voxel_size.x.item()
@@ -491,35 +497,16 @@ def _project_map(map_path, proj_path):
     ft = crop_or_pad_from_px_sizes(ft_and_shift(img), px_size, BIN_RESOLUTION)
     # # gaussian filter in fourier space as well to help with rotations and whatnot
     # ft *= gaussian_window(ft.shape)
-    proj = rotated_projection_fts(ft)
-
-    torch.save(proj, proj_path)
-    return proj_path
-
-
-def _project_map_real(map_path, proj_path, overwrite=False):
-    with mrcfile.open(map_path) as mrc:
-        img = torch.from_numpy(mrc.data.astype(np.float32, copy=True))
-        px_size = mrc.voxel_size.x.item()
-
-    # apply gaussian window to avoid edge issues
-    img = normalize(img)
-    img *= gaussian_window(img.shape)
-
-    # pad if needed
-    if not np.all(img.shape[0] == np.array(img.shape)):
-        # not square, pad to square before projecting
-        img = pad_to(img, [np.max(img.shape)] * 3)
-
-    img = normalize(img)
-
-    ft = ft_and_shift(img)
     proj_ft = rotated_projection_fts(ft)
-    # for posterity: real - and not abs - should be right here!
-    proj = np.array(ift_and_shift(proj_ft, dim=(1, 2))).real
+    proj = ift_and_shift(proj_ft, dim=(1, 2)).real
+    proj = normalize(proj, dim=(1, 2))
 
-    with mrcfile.new(proj_path, proj, overwrite=overwrite) as mrc:
-        mrc.voxel_size = px_size
+    if save_as_mrc:
+        with mrcfile.new(proj_path, proj, overwrite=True) as mrc:
+            mrc.voxel_size = px_size
+    else:
+        torch.save(proj, proj_path)
+    return proj_path
 
 
 def project_maps(prog, db_path, overwrite, log, dry_run, threads):

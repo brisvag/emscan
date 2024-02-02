@@ -220,6 +220,9 @@ def scan(
                     cc_dict = fut.result()
                     log.info(f"finished correlating to {entry_id}")
                     df = pd.DataFrame(cc_dict, index=pd.Index([entry_id], name="entry"))
+                    if output.exists() and overwrite:
+                        overwrite = False
+                        output.unlink()
                     df.to_csv(output, sep="\t", header=add_header, index=True, mode="a")
                     add_header = False  # so we only add once
                 prog.update(task, advance=1)
@@ -261,7 +264,7 @@ def show(ctx, correlation_results, class_group, top_n, class_image):
     import torch
     from rich import print
 
-    from emscan._functions import ift_and_shift, load_class_data, pad_to
+    from emscan._functions import load_class_data, pad_to
 
     db_path = ctx.obj["db_path"]
     ctx.obj["overwrite"]
@@ -305,8 +308,7 @@ def show(ctx, correlation_results, class_group, top_n, class_image):
             if not selected or i in selected:
                 imgs[f"class {i}"] = d[None]
     for entry in uniq_entries:
-        ft = torch.load(db_path / f"{entry:04}.pt")
-        imgs[entry] = ift_and_shift(ft, dim=(1, 2))
+        imgs[entry] = torch.load(db_path / f"{entry:04}.pt")
     max_size = np.max([img.shape for img in imgs.values()], axis=0)
     for entry, img in imgs.items():
         img = np.array(pad_to(img, max_size, dim=(1, 2))).real.squeeze()
@@ -386,7 +388,7 @@ def view_entries(ctx, entries, class_image):
     import numpy as np
     import torch
 
-    from ._functions import ift_and_shift, load_class_data, pad_to
+    from ._functions import load_class_data, pad_to
 
     db_path = ctx.obj["db_path"]
 
@@ -398,8 +400,7 @@ def view_entries(ctx, entries, class_image):
         for i, d in enumerate(classes_data):
             imgs[f"class {i}"] = d[None]
     for entry in entries:
-        ft = torch.load(db_path / f"{entry:04}.pt")
-        imgs[entry] = ift_and_shift(ft, dim=(1, 2))
+        imgs[entry] = torch.load(db_path / f"{entry:04}.pt")
     max_size = np.max([img.shape for img in imgs.values()], axis=0)
     for entry, img in imgs.items():
         img = np.array(pad_to(img, max_size, dim=(1, 2))).real.squeeze()
@@ -420,14 +421,16 @@ def project(ctx, map_file):
     """Generate rotated templates from the given map."""
     from pathlib import Path
 
-    from ._functions import _project_map_real
+    from ._functions import _project_map
 
     overwrite = ctx.obj["overwrite"]
 
     map_file = Path(map_file)
     proj = map_file.with_stem(map_file.stem + "_proj")
+    if proj.exists() and not overwrite:
+        raise FileExistsError(proj)
 
-    _project_map_real(map_file, proj, overwrite=overwrite)
+    _project_map(map_file, proj, save_as_mrc=True)
 
 
 if __name__ == "__main__":
