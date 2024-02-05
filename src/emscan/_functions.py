@@ -58,13 +58,16 @@ def _print_tensors(depth=2):
     print("=" * 80)
 
 
-def normalize(img, dim=None):
+def normalize(img, dim=None, inplace=True):
     """Normalize images to std=1 and mean=0."""
     if not torch.is_complex(img):
-        img = img.to(torch.float32)
+        img = img.to(torch.float32, copy=not inplace)
+    elif not inplace:
+        img = img.copy()
     img -= img.mean(dim=dim, keepdim=True)
     img /= img.std(dim=dim, keepdim=True)
-    img = torch.nan_to_num(img, out=img)
+    if img.isnan().any():
+        img = torch.nan_to_num(img, out=img)
     return img
 
 
@@ -88,30 +91,25 @@ def rotations(img, degree_range, center=None):
     if center is None:
         center = list(np.array(img.shape) // 2)
 
+    def _rotate(arr, ang):
+        return rotate(
+            arr,
+            ang,
+            center=center,
+            interpolation=InterpolationMode.BILINEAR,
+        )[0]
+
+    gauss = gaussian_window(img.shape, device=img.device)
+
     for angle in degree_range:
         if torch.is_complex(img):
-            real = rotate(
-                img.real[None],
-                angle,
-                center=center,
-                interpolation=InterpolationMode.BILINEAR,
-            )[0]
-            imag = rotate(
-                img.imag[None],
-                angle,
-                center=center,
-                interpolation=InterpolationMode.BILINEAR,
-            )[0]
+            real = _rotate(img.real[None], angle)
+            imag = _rotate(img.imag[None], angle)
             rot = real + (1j * imag)
             del real, imag
         else:
-            rot = rotate(
-                img[None],
-                angle,
-                center=center,
-                interpolation=InterpolationMode.BILINEAR,
-            )[0]
-        yield rot
+            rot = _rotate(img[None], angle)
+        yield angle, rot * gauss
         del rot
 
 
@@ -249,7 +247,7 @@ def crop_or_pad_from_px_sizes(ft, px_size_in, px_size_out, dim=None):
     return resize(ft, target_shape, dim=dim)
 
 
-def compute_ncc(S, entry_path, device=None, angle_step=5):
+def compute_ncc(S, entry_path, angle_step=5):
     """Fast cross correlation of all elements of projections and the image.
 
     Performs also rotations and mirroring to cover all orientations.
@@ -259,31 +257,30 @@ def compute_ncc(S, entry_path, device=None, angle_step=5):
     Optimized to reduce operations (FFTs are precomputed and images are pre-normalized).
     Some stuff is also easier because L[0] and S are forced to have the same shape if S is big.
     """
-    corr_values = {}
+    corr_results = {"values": {}, "indices": {}, "angles": {}}
 
     # see link above for what is L, LL, S, U, and the equation
-    L = torch.load(entry_path, map_location=device)
-    L_ = ft_and_shift(L, dim=(1, 2))
-    LL_ = ft_and_shift(L**2, dim=(1, 2))
+    L = torch.load(entry_path, map_location=S.device)
 
     if S.shape[-1] < L.shape[-1]:
-        # padding happens
-        U_ = ft_and_shift(pad_to(torch.ones_like(S[0], device=device), L[0].shape))
-        N = S[0].nelement()
-        # S should be already normalized (and shoudd not be normalized after padding)
-        S = pad_to(S, L.shape, dim=(1, 2))
+        # crop L
+        L = crop_to(L, S.shape, dim=(1, 2))
+        L = normalize(L, dim=(1, 2), inplace=False)
     else:
         # cropping, so assume "same size" of S and L
-        U_ = ft_and_shift(torch.ones_like(L[0], device=device))
-        N = L[0].nelement()
         S = crop_to(S, L.shape, dim=(1, 2))
-        S = normalize(S, dim=(1, 2))
+        S = normalize(S, dim=(1, 2), inplace=False)
+
+    L_ = ft_and_shift(L, dim=(1, 2))
+    LL_ = ft_and_shift(L**2, dim=(1, 2))
+    N = S[0].nelement()
+    # TODO this is just zeros with N in the center
+    U_ = ft_and_shift(torch.ones_like(S[0], device=S.device))
 
     def _cc(ft1, ft2):
-        return ift_and_shift(ft1 * ft2.conj(), dim=(1, 2)).real.amax(dim=(1, 2))
+        return ift_and_shift(ft1 * ft2.conj(), dim=(1, 2)).real
 
     denom = torch.sqrt((N * _cc(U_, LL_)) - (_cc(U_, L_) ** 2))
-
     n_proj = len(L)
 
     del L, LL_, U_
@@ -295,38 +292,51 @@ def compute_ncc(S, entry_path, device=None, angle_step=5):
 
     for cls_idx, cls in enumerate(S):
         best_ccs = torch.zeros(n_proj, device=S.device)
+        best_ang = torch.zeros(n_proj, device=S.device)
 
-        for cls_rot in rotations(cls, range(0, 360, angle_step)):
+        for angle, cls_rot in rotations(cls, range(0, 360, angle_step)):
             # normalize to avoid needing std and mean in ncc calculation
             cls_rot = normalize(cls_rot)
             # also correlate transposed image, because we only have half a sphere of projections
             for cls_flip in (cls_rot, cls_rot.T):
                 S_ = ft_and_shift(cls_flip)
-                ccs = ncc(S_)  # TODO: is abs correct here?
-                best_ccs = torch.amax(torch.stack([ccs, best_ccs]), dim=0)
+                ccs = ncc(S_).amax(dim=(1, 2))
+                best_ccs, replaced = torch.max(torch.stack([best_ccs, ccs]), dim=0)
+                best_ang[replaced == 1] = angle
                 del S_, ccs
             del cls_rot
-        corr_values[cls_idx] = best_ccs.max().item()
-        del cls, best_ccs
+
+        best_cc, best_idx = best_ccs.max(dim=0)
+        corr_results["values"][cls_idx] = best_cc.item()
+        corr_results["indices"][cls_idx] = best_idx.item()
+        corr_results["angles"][cls_idx] = best_ang[best_idx.item()].item()
+        del cls, best_ccs, best_cc, best_ang
     del L_, S, denom
-    return corr_values
+    return corr_results
 
 
-def load_class_data(cls_path, device=None):
+def load_class_data(cls_path, device=None, fraction=1):
     with mrcfile.mmap(cls_path) as mrc:
-        class_data = torch.tensor(mrc.data, device=device)
+        class_data = coerce_ndim(torch.tensor(mrc.data, device=device), 3)
         class_px_size = mrc.voxel_size.x.item()
 
-    class_data = normalize(coerce_ndim(class_data, 3), dim=(1, 2))
+    class_data = normalize(class_data, dim=(1, 2))
     class_data *= gaussian_window(class_data.shape[1:], device=device)
     class_data = normalize(class_data, dim=(1, 2))
 
     # crop/pad ft to match pixel size
     class_ft = ft_and_shift(class_data, dim=(1, 2))
+
     class_ft = crop_or_pad_from_px_sizes(
         class_ft, class_px_size, BIN_RESOLUTION, dim=(1, 2)
     )
     class_data = ift_and_shift(class_ft, dim=(1, 2)).real
+
+    if fraction < 1:
+        cropped_shape = (np.array(class_data.shape) * fraction).round().astype(int)
+        class_data = crop_to(class_data, cropped_shape, dim=(1, 2))
+        class_data *= gaussian_window(class_data.shape[1:], device=device)
+
     class_data = normalize(class_data, dim=(1, 2))
     del class_ft
     return class_data

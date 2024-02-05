@@ -139,11 +139,17 @@ def gen_db(
     type=click.Path(dir_okay=False, file_okay=True),
     help="Output json file with the cc data. [default: <CLASSES_NAME>.csv]",
 )
+@click.option(
+    "--fraction",
+    type=float,
+    default=1,
+)
 @click.pass_context
 def scan(
     ctx,
     classes,
     output,
+    fraction,
 ):
     """Find emdb entries similar to the given 2D classes."""
     from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -196,16 +202,17 @@ def scan(
         with ProcessPoolExecutor(max_workers=devices) as pool:
             # pre-load class data for each gpu
             cls_data = {
-                device: load_class_data(classes, device=f"cuda:{device}")
+                device: load_class_data(
+                    classes, device=f"cuda:{device}", fraction=fraction
+                )
                 for device in range(devices)
             }
 
             futures = {
                 pool.submit(
                     compute_ncc,
-                    cls_data[(device := idx % devices)],
+                    cls_data[idx % devices],
                     entry,
-                    f"cuda:{device}",
                 ): entry
                 for idx, entry in enumerate(entries)
             }
@@ -215,16 +222,23 @@ def scan(
                     err = fut.exception()
                     err.add_note(entry_id)
                     errors.append(err)
-                    log.warn(f"failed correlating {entry_id}")
+                    log.warn(f"failed correlating {entry_id}: {err}")
                 else:
                     cc_dict = fut.result()
                     log.info(f"finished correlating to {entry_id}")
-                    df = pd.DataFrame(cc_dict, index=pd.Index([entry_id], name="entry"))
-                    if output.exists() and overwrite:
-                        overwrite = False
-                        output.unlink()
-                    df.to_csv(output, sep="\t", header=add_header, index=True, mode="a")
+                    for k, v in cc_dict.items():
+                        if k != "values":
+                            out = output.with_stem(f"{output.stem}_{k}")
+                        else:
+                            out = output
+                        if out.exists() and overwrite:
+                            out.unlink()
+                        df = pd.DataFrame(v, index=pd.Index([entry_id], name="entry"))
+                        df.to_csv(
+                            out, sep="\t", header=add_header, index=True, mode="a"
+                        )
                     add_header = False  # so we only add once
+                    overwrite = False
                 prog.update(task, advance=1)
 
     if errors:
@@ -250,8 +264,13 @@ def scan(
     type=click.Path(exists=True, dir_okay=False, resolve_path=True),
     help="Image that was used for the correlation.",
 )
+@click.option(
+    "--fraction",
+    type=float,
+    default=1,
+)
 @click.pass_context
-def show(ctx, correlation_results, class_group, top_n, class_image):
+def show(ctx, correlation_results, class_group, top_n, class_image, fraction):
     """Parse correlation results and show related emdb entries and plots."""
     import webbrowser
     from inspect import cleandoc
@@ -282,6 +301,8 @@ def show(ctx, correlation_results, class_group, top_n, class_image):
             mean = df[cols].mean(axis=1)
             df_selected[group] = mean
 
+    df_selected.dropna(how="any", inplace=True)
+
     fig = px.histogram(df_selected, x=df_selected.columns, nbins=50)
     fig.show()
 
@@ -303,7 +324,7 @@ def show(ctx, correlation_results, class_group, top_n, class_image):
 
     imgs = {}
     if class_image is not None:
-        classes_data = load_class_data(class_image, device="cpu")
+        classes_data = load_class_data(class_image, device="cpu", fraction=fraction)
         for i, d in enumerate(classes_data):
             if not selected or i in selected:
                 imgs[f"class {i}"] = d[None]
