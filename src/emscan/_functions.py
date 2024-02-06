@@ -1,9 +1,12 @@
 import gc
 import inspect
+import os
 import re
-from functools import lru_cache, partial
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import lru_cache, partial, reduce
 from itertools import chain
 from math import ceil, floor
+from operator import mul
 from pathlib import Path
 from threading import Semaphore
 
@@ -16,6 +19,7 @@ import torch
 import xmltodict
 from morphosamplers.sampler import sample_subvolumes
 from rich import print
+from scipy.signal.windows import gaussian
 from scipy.spatial.transform import Rotation
 from torch.fft import fftn, fftshift, ifftn, ifftshift
 from torch.multiprocessing import set_start_method
@@ -54,22 +58,41 @@ def _print_tensors(depth=2):
     print("=" * 80)
 
 
-def normalize(img, dim=None):
+def normalize(img, dim=None, inplace=True):
     """Normalize images to std=1 and mean=0."""
     if not torch.is_complex(img):
-        img = img.to(torch.float32)
+        img = img.to(torch.float32, copy=not inplace)
+    elif not inplace:
+        img = img.copy()
     img -= img.mean(dim=dim, keepdim=True)
     img /= img.std(dim=dim, keepdim=True)
-    img = torch.nan_to_num(img, out=img)
+    if img.isnan().any():
+        img = torch.nan_to_num(img, out=img)
     return img
 
 
 def ft_and_shift(img, dim=None):
-    return fftshift(fftn(fftshift(img, dim=dim), dim=dim), dim=dim)
+    # first move the image to be center of the origin (ifftshift), which improves
+    # interpolation artifacts later (ftshift is equivalent to multiplying
+    # with a checkerboard, which messes up interpolation real bad)
+    return fftshift(fftn(ifftshift(img, dim=dim), dim=dim), dim=dim)
 
 
 def ift_and_shift(img, dim=None):
-    return ifftshift(ifftn(ifftshift(img, dim=dim), dim=dim), dim=dim)
+    # undo the above (note the order is the same cause it's actually inverted)
+    return fftshift(ifftn(ifftshift(img, dim=dim), dim=dim), dim=dim)
+
+
+def rotate_by(arr, ang, center=None):
+    if center is None:
+        center = list(np.array(arr.shape) // 2)
+
+    return rotate(
+        arr[None],
+        ang,
+        center=center,
+        interpolation=InterpolationMode.BILINEAR,
+    )[0]
 
 
 def rotations(img, degree_range, center=None):
@@ -77,36 +100,17 @@ def rotations(img, degree_range, center=None):
 
     degree range: iterable of degrees (counterclockwise).
     """
-    if center is None:
-        center = list(np.array(img.shape) // 2)
+    gauss = gaussian_window(img.shape, device=img.device)
 
     for angle in degree_range:
         if torch.is_complex(img):
-            real = rotate(
-                img.real[None],
-                angle,
-                center=center,
-                interpolation=InterpolationMode.BILINEAR,
-            )[0]
-            imag = rotate(
-                img.imag[None],
-                angle,
-                center=center,
-                interpolation=InterpolationMode.BILINEAR,
-            )[0]
-            rot = angle, real + (1j * imag)
+            real = rotate_by(img.real, angle, center)
+            imag = rotate_by(img.imag, angle, center)
+            rot = real + (1j * imag)
             del real, imag
         else:
-            rot = (
-                angle,
-                rotate(
-                    img[None],
-                    angle,
-                    center=center,
-                    interpolation=InterpolationMode.BILINEAR,
-                )[0],
-            )
-        yield rot
+            rot = rotate_by(img, angle, center)
+        yield angle, rot * gauss
         del rot
 
 
@@ -158,15 +162,38 @@ def rotated_projection_fts(ft):
     return torch.from_numpy(slices)
 
 
+def gaussian_window(shape, sigmas=None, device=None):
+    """Generate a gaussian_window of the given shape and sigmas, ensuring it goes to zero."""
+    if sigmas is None:
+        sigmas = np.array(shape)
+    sigmas = np.broadcast_to(sigmas, len(shape))
+    windows = [gaussian(n, s) for n, s in zip(shape, sigmas, strict=True)]
+    mins = np.array([min(w) for w in windows])
+    maxs = np.array([max(w) for w in windows])
+    zero = np.max(mins * maxs.reshape(-1, 1))
+    tensors = [torch.tensor(w, device=device) for w in np.ix_(*windows)]
+    window = reduce(mul, tensors)
+    window -= zero
+    window = torch.clip(window, 0, 1)
+    window /= window.max()
+    return window
+
+
 def crop_to(img, target_shape, dim=None):
     if dim is None:
         dim = tuple(range(img.ndim))
+    # ensure we round the cropping correctly to keeo the center in the right place
+    if img.shape[0] % 2:
+        round_left, round_right = floor, ceil
+    else:
+        round_left, round_right = ceil, floor
     edge_crop = (np.array(img.shape) - np.array(target_shape)) / 2
     crop_left = tuple(
-        floor(edge_crop[d]) or None if d in dim else None for d in range(img.ndim)
+        round_left(edge_crop[d]) or None if d in dim else None for d in range(img.ndim)
     )
     crop_right = tuple(
-        -ceil(edge_crop[d]) or None if d in dim else None for d in range(img.ndim)
+        -round_right(edge_crop[d]) or None if d in dim else None
+        for d in range(img.ndim)
     )
     crop_slice = tuple(
         slice(*crops) for crops in zip(crop_left, crop_right, strict=True)
@@ -177,9 +204,18 @@ def crop_to(img, target_shape, dim=None):
 def pad_to(img, target_shape, dim=None, value=0):
     if dim is None:
         dim = tuple(range(img.ndim))
+    # ensure we round the padding correctly to keeo the center in the right place
+    if img.shape[0] % 2:
+        round_left, round_right = ceil, floor
+    else:
+        round_left, round_right = floor, ceil
     edge_pad = (np.array(target_shape) - np.array(img.shape)) / 2
-    pad_left = tuple(floor(edge_pad[d]) if d in dim else 0 for d in range(img.ndim))
-    pad_right = tuple(ceil(edge_pad[d]) if d in dim else 0 for d in range(img.ndim))
+    pad_left = tuple(
+        round_left(edge_pad[d]) if d in dim else 0 for d in range(img.ndim)
+    )
+    pad_right = tuple(
+        round_right(edge_pad[d]) if d in dim else 0 for d in range(img.ndim)
+    )
     padding = tuple(chain.from_iterable(zip(pad_right, pad_left, strict=True)))[::-1]
     padded = torch.nn.functional.pad(img, padding, value=value)
     return padded
@@ -212,71 +248,97 @@ def crop_or_pad_from_px_sizes(ft, px_size_in, px_size_out, dim=None):
     return resize(ft, target_shape, dim=dim)
 
 
-def correlate_rotations(img_ft, proj_fts, angle_step=5):
+def compute_ncc(S, entry_path, angle_step=5):
     """Fast cross correlation of all elements of projections and the image.
 
     Performs also rotations and mirroring to cover all orientations.
-    Input fts must be fftshifted+fftd+fftshifted.
+
+    Based on eq (9) from:
+    https://w.imagemagick.org/docs/AcceleratedTemplateMatchingUsingLocalStatisticsAndFourierTransforms.pdf
+    Optimized to reduce operations (FFTs are precomputed and images are pre-normalized).
+    Some stuff is also easier because L[0] and S are forced to have the same shape if S is big.
     """
-    shape1 = tuple(img_ft.shape)
-    shape2 = tuple(proj_fts.shape[1:])
-    if not np.allclose(shape1, shape2):
-        raise RuntimeError(
-            f"correlate requires the same shape, got {shape1} and {shape2}"
-        )
+    corr_results = {"values": {}, "indices": {}, "angles": {}}
 
-    img_autocc = torch.abs(ift_and_shift(img_ft * img_ft.conj()))
-    proj_autocc = torch.abs(ift_and_shift(proj_fts * proj_fts.conj(), dim=(1, 2)))
-    denoms = torch.sqrt(img_autocc.amax()) * torch.sqrt(proj_autocc.amax(dim=(1, 2)))
-    del img_autocc, proj_autocc
+    # see link above for what is L, LL, S, U, and the equation
+    L = torch.load(entry_path, map_location=S.device)
 
-    best_ccs = torch.zeros(len(proj_fts), device=proj_fts.device)
-    for _, img_ft_rot in rotations(img_ft, range(0, 360, angle_step)):
-        # also correlate transposed image, because we only have half a sphere of projections
-        for flip in (img_ft_rot, img_ft_rot.T):
-            ccs = (
-                torch.abs(ift_and_shift(flip[None] * proj_fts.conj(), dim=(1, 2))).amax(
-                    dim=(1, 2)
-                )
-                / denoms
-            )
-            best_ccs = torch.amax(torch.stack([ccs, best_ccs]), dim=0)
-            del ccs
-    del img_ft, proj_fts
-    return best_ccs
+    if S.shape[-1] < L.shape[-1]:
+        # crop L
+        L = crop_to(L, S.shape, dim=(1, 2))
+        L = normalize(L, dim=(1, 2), inplace=False)
+    else:
+        # cropping, so assume "same size" of S and L
+        S = crop_to(S, L.shape, dim=(1, 2))
+        S = normalize(S, dim=(1, 2), inplace=False)
+
+    L_ = ft_and_shift(L, dim=(1, 2))
+    LL_ = ft_and_shift(L**2, dim=(1, 2))
+    N = S[0].nelement()
+    # TODO this is just zeros with N in the center
+    U_ = ft_and_shift(torch.ones_like(S[0], device=S.device))
+
+    def _cc(ft1, ft2):
+        return ift_and_shift(ft1 * ft2.conj(), dim=(1, 2)).real
+
+    denom = torch.sqrt((N * _cc(U_, LL_)) - (_cc(U_, L_) ** 2))
+    n_proj = len(L)
+
+    del L, LL_, U_
+
+    def ncc(S_):
+        nonlocal denom, L_
+        # NOTE: this assume S is ft of normalized image (std=1, mean=0)
+        return _cc(S_, L_) / denom
+
+    for cls_idx, cls in enumerate(S):
+        best_ccs = torch.zeros(n_proj, device=S.device)
+        best_ang = torch.zeros(n_proj, device=S.device)
+
+        for angle, cls_rot in rotations(cls, range(0, 360, angle_step)):
+            # normalize to avoid needing std and mean in ncc calculation
+            cls_rot = normalize(cls_rot)
+            # also correlate transposed image, because we only have half a sphere of projections
+            for cls_flip in (cls_rot, cls_rot.T):
+                S_ = ft_and_shift(cls_flip)
+                ccs = ncc(S_).amax(dim=(1, 2))
+                best_ccs, replaced = torch.max(torch.stack([best_ccs, ccs]), dim=0)
+                best_ang[replaced == 1] = angle
+                del S_, ccs
+            del cls_rot
+
+        best_cc, best_idx = best_ccs.max(dim=0)
+        corr_results["values"][cls_idx] = best_cc.item()
+        corr_results["indices"][cls_idx] = best_idx.item()
+        corr_results["angles"][cls_idx] = best_ang[best_idx.item()].item()
+        del cls, best_ccs, best_cc, best_ang
+    del L_, S, denom
+    return corr_results
 
 
-def compute_cc(class_data, entry_path, device=None):
-    corr_values = {}
-    entry_data = torch.load(entry_path, map_location=device)
-
-    # crop/pad in real space to match target shape
-    class_data = resize(class_data, entry_data.shape, dim=(1, 2))
-    # go back to ft
-    class_ft = ft_and_shift(class_data, dim=(1, 2))
-    del class_data
-
-    for cls_idx, cls in enumerate(class_ft):
-        ccs = correlate_rotations(cls, entry_data)
-        corr_values[cls_idx] = ccs.max().item()
-        del ccs
-    del entry_data
-    return corr_values
-
-
-def load_class_data(cls_path, device=None):
+def load_class_data(cls_path, device=None, fraction=1):
     with mrcfile.mmap(cls_path) as mrc:
-        class_data = torch.tensor(mrc.data, device=device)
+        class_data = coerce_ndim(torch.tensor(mrc.data, device=device), 3)
         class_px_size = mrc.voxel_size.x.item()
 
-    class_data = normalize(coerce_ndim(class_data, 3), dim=(1, 2))
+    class_data = normalize(class_data, dim=(1, 2))
+    class_data *= gaussian_window(class_data.shape[1:], device=device)
+    class_data = normalize(class_data, dim=(1, 2))
 
     # crop/pad ft to match pixel size
     class_ft = ft_and_shift(class_data, dim=(1, 2))
+
     class_ft = crop_or_pad_from_px_sizes(
         class_ft, class_px_size, BIN_RESOLUTION, dim=(1, 2)
     )
-    class_data = ift_and_shift(class_ft, dim=(1, 2))
+    class_data = ift_and_shift(class_ft, dim=(1, 2)).real
+
+    if fraction < 1:
+        cropped_shape = (np.array(class_data.shape) * fraction).round().astype(int)
+        class_data = crop_to(class_data, cropped_shape, dim=(1, 2))
+        class_data *= gaussian_window(class_data.shape[1:], device=device)
+
+    class_data = normalize(class_data, dim=(1, 2))
     del class_ft
     return class_data
 
@@ -427,42 +489,38 @@ def extract_maps(prog, db_path, dry_run):
         prog.update(task, advance=1)
 
 
-def _project_map(map_path, proj_path):
+def _project_map(map_path, proj_path, save_as_mrc=False):
     with mrcfile.open(map_path) as mrc:
-        data = mrc.data.astype(np.float32, copy=True)
+        img = torch.from_numpy(mrc.data.astype(np.float32, copy=True))
         px_size = mrc.voxel_size.x.item()
 
-    img = normalize(torch.from_numpy(data))
-    if not np.all(data.shape[0] == np.array(data.shape)):
+    # apply gaussian window to avoid edge issues
+    img = normalize(img)
+    img *= gaussian_window(img.shape)
+
+    # pad if needed
+    if not np.all(img.shape[0] == np.array(img.shape)):
         # not square, pad to square before projecting
-        img = pad_to(img, [np.max(data.shape)] * 3)
+        img = pad_to(img, [np.max(img.shape)] * 3)
+
+    img = normalize(img)
 
     ft = crop_or_pad_from_px_sizes(ft_and_shift(img), px_size, BIN_RESOLUTION)
-    proj = rotated_projection_fts(ft)
+    # # gaussian filter in fourier space as well to help with rotations and whatnot
+    # ft *= gaussian_window(ft.shape)
+    proj_ft = rotated_projection_fts(ft)
+    proj = ift_and_shift(proj_ft, dim=(1, 2)).real
+    proj = normalize(proj, dim=(1, 2))
 
-    torch.save(proj, proj_path)
+    if save_as_mrc:
+        with mrcfile.new(proj_path, proj, overwrite=True) as mrc:
+            mrc.voxel_size = px_size
+    else:
+        torch.save(proj, proj_path)
     return proj_path
 
 
-def _project_map_real(map_path, proj_path, overwrite=False):
-    with mrcfile.open(map_path) as mrc:
-        data = mrc.data.astype(np.float32, copy=True)
-        px_size = mrc.voxel_size.x.item()
-
-    img = normalize(torch.from_numpy(data))
-    if not np.all(data.shape[0] == np.array(data.shape)):
-        # not square, pad to square before projecting
-        img = pad_to(img, [np.max(data.shape)] * 3)
-
-    ft = ft_and_shift(img)
-    proj_ft = rotated_projection_fts(ft)
-    proj = np.array(ift_and_shift(proj_ft, dim=(1, 2))).real
-
-    with mrcfile.new(proj_path, proj, overwrite=overwrite) as mrc:
-        mrc.voxel_size = px_size
-
-
-def project_maps(prog, db_path, overwrite, log, dry_run):
+def project_maps(prog, db_path, overwrite, log, dry_run, threads):
     maps = list(db_path.glob("*.map"))
     task = prog.add_task(
         description="Checking existing projections...", total=len(maps)
@@ -474,7 +532,7 @@ def project_maps(prog, db_path, overwrite, log, dry_run):
     for m in maps:
         prog.update(task, advance=1)
         proj = db_path / (re.search(r"\d+", m.stem).group() + ".pt")
-        if not overwrite and proj.exists():
+        if proj.exists() and not overwrite:
             exist += 1
             continue
         maps_to_project.append(m)
@@ -492,33 +550,41 @@ def project_maps(prog, db_path, overwrite, log, dry_run):
     torch.set_default_dtype(torch.float32)
     set_start_method("spawn", force=True)
 
-    # single-threaded for testing
-    errors = []
-    for m, p in zip(maps_to_project, projections, strict=True):
-        try:
-            _project_map(m, p)
-            log.info(f"finished projecting {p.stem}")
-        except Exception as e:
-            e.add_note(m.stem)
-            errors.append(e)
-            log.warn(f"failed projecting {p.stem}")
-        prog.update(task, advance=1)
-    if errors:
-        raise ExceptionGroup("Some projections failed", errors)
+    # # single-threaded for testing
+    # errors = []
+    # for m, p in zip(maps_to_project, projections, strict=True):
+    #     try:
+    #         _project_map(m, p)
+    #         log.info(f"finished projecting {p.stem}")
+    #     except Exception as e:
+    #         e.add_note(m.stem)
+    #         errors.append(e)
+    #         log.warn(f"failed projecting {p.stem}")
+    #     prog.update(task, advance=1)
+    # if errors:
+    #     raise ExceptionGroup("Some projections failed", errors)
 
-    # with Pool(processes=os.cpu_count() // 2, initializer=os.nice, initargs=(10,)) as pool:
-    #     results = [
-    #         pool.apply_async(_project_map, (m, p)) for m, p in zip(maps, projections, strict=True)
-    #     ]
-    #     while len(results):
-    #         sleep(0.1)
-    #         for res in tuple(results):
-    #             if res.ready():
-    #                 proj_path = res.get()
-    #                 log.info(f"finished projecting {proj_path.stem}")
-    #                 prog.update(task, advance=1)
-    #                 results.pop(results.index(res))
-    #
+    threads = threads if threads > 0 else os.cpu_count() // 4
+
+    errors = []
+    with ProcessPoolExecutor(
+        max_workers=threads, initializer=os.nice, initargs=(10,)
+    ) as pool:
+        results = {
+            pool.submit(_project_map, m, p): m
+            for m, p in zip(maps_to_project, projections, strict=True)
+        }
+        for fut in as_completed(results):
+            map_file = results[fut].stem
+            if fut.exception():
+                err = fut.exception()
+                err.add_note(map_file)
+                errors.append(err)
+                log.warn(f"failed projecting {map_file}")
+            else:
+                proj_path = fut.result()
+                log.info(f"finished projecting {proj_path.stem}")
+            prog.update(task, advance=1)
 
 
 def _parse_headers(db_path):

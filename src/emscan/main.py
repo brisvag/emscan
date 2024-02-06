@@ -64,12 +64,19 @@ def cli(ctx, db_path, overwrite, verbose, dry_run):
     is_flag=True,
     help="Generate projections for all the available maps.",
 )
+@click.option(
+    "-t",
+    "--threads",
+    default=0,
+    help="How many threads to use for projection. If <= 0, guess a good number.",
+)
 @click.pass_context
 def gen_db(
     ctx,
     list_,
     maps,
     projections,
+    threads,
 ):
     """Generate the projection database."""
     if not list_ and not maps and not projections:
@@ -118,6 +125,7 @@ def gen_db(
                 overwrite=overwrite,
                 log=log,
                 dry_run=dry_run,
+                threads=threads,
             )
 
 
@@ -131,11 +139,17 @@ def gen_db(
     type=click.Path(dir_okay=False, file_okay=True),
     help="Output json file with the cc data. [default: <CLASSES_NAME>.csv]",
 )
+@click.option(
+    "--fraction",
+    type=float,
+    default=1,
+)
 @click.pass_context
 def scan(
     ctx,
     classes,
     output,
+    fraction,
 ):
     """Find emdb entries similar to the given 2D classes."""
     from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -148,7 +162,7 @@ def scan(
     from torch.multiprocessing import set_start_method
 
     from emscan._functions import (
-        compute_cc,
+        compute_ncc,
         load_class_data,
     )
 
@@ -188,16 +202,17 @@ def scan(
         with ProcessPoolExecutor(max_workers=devices) as pool:
             # pre-load class data for each gpu
             cls_data = {
-                device: load_class_data(classes, device=f"cuda:{device}")
+                device: load_class_data(
+                    classes, device=f"cuda:{device}", fraction=fraction
+                )
                 for device in range(devices)
             }
 
             futures = {
                 pool.submit(
-                    compute_cc,
-                    cls_data[(device := idx % devices)],
+                    compute_ncc,
+                    cls_data[idx % devices],
                     entry,
-                    f"cuda:{device}",
                 ): entry
                 for idx, entry in enumerate(entries)
             }
@@ -207,13 +222,23 @@ def scan(
                     err = fut.exception()
                     err.add_note(entry_id)
                     errors.append(err)
-                    log.warn(f"failed correlating {entry_id}")
+                    log.warn(f"failed correlating {entry_id}: {err}")
                 else:
                     cc_dict = fut.result()
                     log.info(f"finished correlating to {entry_id}")
-                    df = pd.DataFrame(cc_dict, index=pd.Index([entry_id], name="entry"))
-                    df.to_csv(output, sep="\t", header=add_header, index=True, mode="a")
+                    for k, v in cc_dict.items():
+                        if k != "values":
+                            out = output.with_stem(f"{output.stem}_{k}")
+                        else:
+                            out = output
+                        if out.exists() and overwrite:
+                            out.unlink()
+                        df = pd.DataFrame(v, index=pd.Index([entry_id], name="entry"))
+                        df.to_csv(
+                            out, sep="\t", header=add_header, index=True, mode="a"
+                        )
                     add_header = False  # so we only add once
+                    overwrite = False
                 prog.update(task, advance=1)
 
     if errors:
@@ -226,11 +251,10 @@ def scan(
     type=click.Path(exists=True, dir_okay=False, resolve_path=True),
 )
 @click.option(
-    "-g",
-    "--class-group",
-    multiple=True,
+    "-s",
+    "--selected-classes",
     type=str,
-    help="comma separated list of indices to use and group. All if empty.",
+    help="comma separated list of classes to select. All if empty.",
 )
 @click.option("-n", "--top-n", default=30, type=int, help="How many top hits to show.")
 @click.option(
@@ -239,11 +263,17 @@ def scan(
     type=click.Path(exists=True, dir_okay=False, resolve_path=True),
     help="Image that was used for the correlation.",
 )
+@click.option(
+    "--fraction",
+    type=float,
+    default=1,
+)
 @click.pass_context
-def show(ctx, correlation_results, class_group, top_n, class_image):
+def show(ctx, correlation_results, selected_classes, top_n, class_image, fraction):
     """Parse correlation results and show related emdb entries and plots."""
     import webbrowser
     from inspect import cleandoc
+    from pathlib import Path
 
     import mrcfile
     import napari
@@ -253,23 +283,51 @@ def show(ctx, correlation_results, class_group, top_n, class_image):
     import torch
     from rich import print
 
-    from emscan._functions import ift_and_shift, load_class_data, pad_to
+    from emscan._functions import load_class_data, pad_to, rotate_by
 
     db_path = ctx.obj["db_path"]
     ctx.obj["overwrite"]
 
+    correlation_results = Path(correlation_results)
     df = pd.read_csv(correlation_results, sep="\t", index_col="entry")
+    df_indices = pd.read_csv(
+        correlation_results.with_stem(f"{correlation_results.stem}_indices"),
+        sep="\t",
+        index_col="entry",
+    )
+    df_angles = pd.read_csv(
+        correlation_results.with_stem(f"{correlation_results.stem}_angles"),
+        sep="\t",
+        index_col="entry",
+    )
+
+    df.dropna(how="any", inplace=True)
+    df_indices = df_indices.loc[df.index]
+    df_angles = df_angles.loc[df.index]
 
     df_selected = pd.DataFrame()
     selected = []
-    if not class_group:
-        df_selected["all"] = df.mean(axis=1)
+    if not selected_classes:
+        selected_classes = "all"
+        selected = list(df.columns)
     else:
-        for group in class_group:
-            cols = group.split(",")
-            selected.extend([int(c) for c in cols])
-            mean = df[cols].mean(axis=1)
-            df_selected[group] = mean
+        selected = selected_classes.split(",")
+
+    df_selected[selected_classes] = df[selected].mean(axis=1)
+
+    # select best scoring hits from angles and indices
+    # (see https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#looking-up-values-by-index-column-labels)
+    best_hits = df[selected].idxmax(axis=1)
+    df_indices["col"] = best_hits
+    idx, selected = pd.factorize(df_indices["col"])
+    df_indices["best"] = df_indices.reindex(selected, axis=1).to_numpy()[
+        np.arange(len(df_indices)), idx
+    ]
+    df_angles["col"] = best_hits
+    idx, selected = pd.factorize(df_angles["col"])
+    df_angles["best"] = df_angles.reindex(selected, axis=1).to_numpy()[
+        np.arange(len(df_angles)), idx
+    ]
 
     fig = px.histogram(df_selected, x=df_selected.columns, nbins=50)
     fig.show()
@@ -284,24 +342,29 @@ def show(ctx, correlation_results, class_group, top_n, class_image):
     print(df_top)
     v = napari.Viewer()
 
-    if df_selected.shape[1] == 1:
-        # preserve order
-        uniq_entries = pd.unique(df_top.iloc[:, 0])
-    else:
-        uniq_entries = np.unique(np.ravel(df_top.iloc[:, ::2]))
+    # preserve order with pd.unique
+    uniq_entries = pd.unique(df_top.iloc[:, 0])
 
     imgs = {}
-    if class_image is not None:
-        classes_data = load_class_data(class_image, device="cpu")
-        for i, d in enumerate(classes_data):
-            if not selected or i in selected:
-                imgs[f"class {i}"] = d[None]
     for entry in uniq_entries:
-        ft = torch.load(db_path / f"{entry:04}.pt")
-        imgs[entry] = ift_and_shift(ft, dim=(1, 2))
+        img = torch.load(db_path / f"{entry:04}.pt")
+        img = img[df_indices.loc[entry, "best"]]
+        imgs[entry] = rotate_by(img, -df_angles.loc[entry, "best"])
+
     max_size = np.max([img.shape for img in imgs.values()], axis=0)
     for entry, img in imgs.items():
-        img = np.array(pad_to(img, max_size, dim=(1, 2))).real.squeeze()
+        imgs[entry] = np.array(pad_to(img, max_size, dim=(0, 1))).real.squeeze()
+
+    if class_image is not None:
+        classes_data = load_class_data(class_image, device="cpu", fraction=fraction)
+        classes_data = np.array(
+            pad_to(classes_data, (1, *max_size), dim=(1, 2)).real.squeeze()
+        )
+        for i, d in enumerate(classes_data):
+            if str(i) in selected:
+                v.add_image(d, name=f"class {i}", interpolation2d="spline36")
+
+    for entry, img in imgs.items():
         v.add_image(img, name=f"{entry:04}", interpolation2d="spline36")
 
     def get_correct_entry(viewer, event):
@@ -336,7 +399,7 @@ def show(ctx, correlation_results, class_group, top_n, class_image):
         entry = get_correct_entry(viewer, event)
         v_ = napari.Viewer()
         for sl in imgs[int(entry)]:
-            v_.add_image(np.array(sl.real))
+            v_.add_image(np.array(sl.real), interpolation2d="spline36")
         v_.grid.enabled = True
 
     print(
@@ -378,7 +441,7 @@ def view_entries(ctx, entries, class_image):
     import numpy as np
     import torch
 
-    from ._functions import ift_and_shift, load_class_data, pad_to
+    from ._functions import load_class_data, pad_to
 
     db_path = ctx.obj["db_path"]
 
@@ -390,8 +453,7 @@ def view_entries(ctx, entries, class_image):
         for i, d in enumerate(classes_data):
             imgs[f"class {i}"] = d[None]
     for entry in entries:
-        ft = torch.load(db_path / f"{entry:04}.pt")
-        imgs[entry] = ift_and_shift(ft, dim=(1, 2))
+        imgs[entry] = torch.load(db_path / f"{entry:04}.pt")
     max_size = np.max([img.shape for img in imgs.values()], axis=0)
     for entry, img in imgs.items():
         img = np.array(pad_to(img, max_size, dim=(1, 2))).real.squeeze()
@@ -412,14 +474,16 @@ def project(ctx, map_file):
     """Generate rotated templates from the given map."""
     from pathlib import Path
 
-    from ._functions import _project_map_real
+    from ._functions import _project_map
 
     overwrite = ctx.obj["overwrite"]
 
     map_file = Path(map_file)
     proj = map_file.with_stem(map_file.stem + "_proj")
+    if proj.exists() and not overwrite:
+        raise FileExistsError(proj)
 
-    _project_map_real(map_file, proj, overwrite=overwrite)
+    _project_map(map_file, proj, save_as_mrc=True)
 
 
 if __name__ == "__main__":
