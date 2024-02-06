@@ -251,11 +251,10 @@ def scan(
     type=click.Path(exists=True, dir_okay=False, resolve_path=True),
 )
 @click.option(
-    "-g",
-    "--class-group",
-    multiple=True,
+    "-s",
+    "--selected-classes",
     type=str,
-    help="comma separated list of indices to use and group. All if empty.",
+    help="comma separated list of classes to select. All if empty.",
 )
 @click.option("-n", "--top-n", default=30, type=int, help="How many top hits to show.")
 @click.option(
@@ -270,10 +269,11 @@ def scan(
     default=1,
 )
 @click.pass_context
-def show(ctx, correlation_results, class_group, top_n, class_image, fraction):
+def show(ctx, correlation_results, selected_classes, top_n, class_image, fraction):
     """Parse correlation results and show related emdb entries and plots."""
     import webbrowser
     from inspect import cleandoc
+    from pathlib import Path
 
     import mrcfile
     import napari
@@ -283,25 +283,51 @@ def show(ctx, correlation_results, class_group, top_n, class_image, fraction):
     import torch
     from rich import print
 
-    from emscan._functions import load_class_data, pad_to
+    from emscan._functions import load_class_data, pad_to, rotate_by
 
     db_path = ctx.obj["db_path"]
     ctx.obj["overwrite"]
 
+    correlation_results = Path(correlation_results)
     df = pd.read_csv(correlation_results, sep="\t", index_col="entry")
+    df_indices = pd.read_csv(
+        correlation_results.with_stem(f"{correlation_results.stem}_indices"),
+        sep="\t",
+        index_col="entry",
+    )
+    df_angles = pd.read_csv(
+        correlation_results.with_stem(f"{correlation_results.stem}_angles"),
+        sep="\t",
+        index_col="entry",
+    )
+
+    df.dropna(how="any", inplace=True)
+    df_indices = df_indices.loc[df.index]
+    df_angles = df_angles.loc[df.index]
 
     df_selected = pd.DataFrame()
     selected = []
-    if not class_group:
-        df_selected["all"] = df.mean(axis=1)
+    if not selected_classes:
+        selected_classes = "all"
+        selected = list(df.columns)
     else:
-        for group in class_group:
-            cols = group.split(",")
-            selected.extend([int(c) for c in cols])
-            mean = df[cols].mean(axis=1)
-            df_selected[group] = mean
+        selected = selected_classes.split(",")
 
-    df_selected.dropna(how="any", inplace=True)
+    df_selected[selected_classes] = df[selected].mean(axis=1)
+
+    # select best scoring hits from angles and indices
+    # (see https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#looking-up-values-by-index-column-labels)
+    best_hits = df[selected].idxmax(axis=1)
+    df_indices["col"] = best_hits
+    idx, selected = pd.factorize(df_indices["col"])
+    df_indices["best"] = df_indices.reindex(selected, axis=1).to_numpy()[
+        np.arange(len(df_indices)), idx
+    ]
+    df_angles["col"] = best_hits
+    idx, selected = pd.factorize(df_angles["col"])
+    df_angles["best"] = df_angles.reindex(selected, axis=1).to_numpy()[
+        np.arange(len(df_angles)), idx
+    ]
 
     fig = px.histogram(df_selected, x=df_selected.columns, nbins=50)
     fig.show()
@@ -316,23 +342,29 @@ def show(ctx, correlation_results, class_group, top_n, class_image, fraction):
     print(df_top)
     v = napari.Viewer()
 
-    if df_selected.shape[1] == 1:
-        # preserve order
-        uniq_entries = pd.unique(df_top.iloc[:, 0])
-    else:
-        uniq_entries = np.unique(np.ravel(df_top.iloc[:, ::2]))
+    # preserve order with pd.unique
+    uniq_entries = pd.unique(df_top.iloc[:, 0])
 
     imgs = {}
-    if class_image is not None:
-        classes_data = load_class_data(class_image, device="cpu", fraction=fraction)
-        for i, d in enumerate(classes_data):
-            if not selected or i in selected:
-                imgs[f"class {i}"] = d[None]
     for entry in uniq_entries:
-        imgs[entry] = torch.load(db_path / f"{entry:04}.pt")
+        img = torch.load(db_path / f"{entry:04}.pt")
+        img = img[df_indices.loc[entry, "best"]]
+        imgs[entry] = rotate_by(img, -df_angles.loc[entry, "best"])
+
     max_size = np.max([img.shape for img in imgs.values()], axis=0)
     for entry, img in imgs.items():
-        img = np.array(pad_to(img, max_size, dim=(1, 2))).real.squeeze()
+        imgs[entry] = np.array(pad_to(img, max_size, dim=(0, 1))).real.squeeze()
+
+    if class_image is not None:
+        classes_data = load_class_data(class_image, device="cpu", fraction=fraction)
+        classes_data = np.array(
+            pad_to(classes_data, (1, *max_size), dim=(1, 2)).real.squeeze()
+        )
+        for i, d in enumerate(classes_data):
+            if str(i) in selected:
+                v.add_image(d, name=f"class {i}", interpolation2d="spline36")
+
+    for entry, img in imgs.items():
         v.add_image(img, name=f"{entry:04}", interpolation2d="spline36")
 
     def get_correct_entry(viewer, event):

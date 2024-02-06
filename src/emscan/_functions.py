@@ -83,32 +83,33 @@ def ift_and_shift(img, dim=None):
     return fftshift(ifftn(ifftshift(img, dim=dim), dim=dim), dim=dim)
 
 
+def rotate_by(arr, ang, center=None):
+    if center is None:
+        center = list(np.array(arr.shape) // 2)
+
+    return rotate(
+        arr[None],
+        ang,
+        center=center,
+        interpolation=InterpolationMode.BILINEAR,
+    )[0]
+
+
 def rotations(img, degree_range, center=None):
     """Generate a number of rotations from an image and a list of angles.
 
     degree range: iterable of degrees (counterclockwise).
     """
-    if center is None:
-        center = list(np.array(img.shape) // 2)
-
-    def _rotate(arr, ang):
-        return rotate(
-            arr,
-            ang,
-            center=center,
-            interpolation=InterpolationMode.BILINEAR,
-        )[0]
-
     gauss = gaussian_window(img.shape, device=img.device)
 
     for angle in degree_range:
         if torch.is_complex(img):
-            real = _rotate(img.real[None], angle)
-            imag = _rotate(img.imag[None], angle)
+            real = rotate_by(img.real, angle, center)
+            imag = rotate_by(img.imag, angle, center)
             rot = real + (1j * imag)
             del real, imag
         else:
-            rot = _rotate(img[None], angle)
+            rot = rotate_by(img, angle, center)
         yield angle, rot * gauss
         del rot
 
