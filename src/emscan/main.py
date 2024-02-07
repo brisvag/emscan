@@ -140,6 +140,13 @@ def gen_db(
     help="Output json file with the cc data. [default: <CLASSES_NAME>.csv]",
 )
 @click.option(
+    "-a",
+    "--angle",
+    type=float,
+    default=5,
+    help="Angle step in degrees for cross correlation rotational search",
+)
+@click.option(
     "--fraction",
     type=float,
     default=1,
@@ -149,6 +156,7 @@ def scan(
     ctx,
     classes,
     output,
+    angle,
     fraction,
 ):
     """Find emdb entries similar to the given 2D classes."""
@@ -213,6 +221,7 @@ def scan(
                     compute_ncc,
                     cls_data[idx % devices],
                     entry,
+                    angle,
                 ): entry
                 for idx, entry in enumerate(entries)
             }

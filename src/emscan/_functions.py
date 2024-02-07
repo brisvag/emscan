@@ -295,7 +295,7 @@ def compute_ncc(S, entry_path, angle_step=5):
         best_ccs = torch.zeros(n_proj, device=S.device)
         best_ang = torch.zeros(n_proj, device=S.device)
 
-        for angle, cls_rot in rotations(cls, range(0, 360, angle_step)):
+        for angle, cls_rot in rotations(cls, np.arange(0, 360, angle_step)):
             # normalize to avoid needing std and mean in ncc calculation
             cls_rot = normalize(cls_rot)
             # also correlate transposed image, because we only have half a sphere of projections
