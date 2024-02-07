@@ -87,7 +87,8 @@ def gen_db(
     from emscan._functions import (
         download_maps,
         extract_maps,
-        get_valid_entries,
+        generate_db_summary,
+        get_entries_to_download,
         project_maps,
         rsync_with_progress,
     )
@@ -108,21 +109,28 @@ def gen_db(
                 local_path=db_path,
                 dry_run=dry_run,
             )
+            generate_db_summary(prog=prog, db_path=db_path, log=log, dry_run=dry_run)
 
-        if maps:
-            to_download = get_valid_entries(
-                prog=prog, db_path=db_path, log=log, dry_run=dry_run
+        if maps or list_:
+            to_download, to_extract, to_project = get_entries_to_download(
+                prog=prog,
+                db_path=db_path,
+                log=log,
+                dry_run=dry_run,
+                overwrite=overwrite,
             )
             download_maps(
                 prog=prog, db_path=db_path, to_download=to_download, dry_run=dry_run
             )
-            extract_maps(prog=prog, db_path=db_path, dry_run=dry_run)
+            extract_maps(
+                prog=prog, db_path=db_path, to_extract=to_extract, dry_run=dry_run
+            )
 
-        if projections:
+        if projections or maps or list_:
             project_maps(
                 prog=prog,
                 db_path=db_path,
-                overwrite=overwrite,
+                to_project=to_project,
                 log=log,
                 dry_run=dry_run,
                 threads=threads,
@@ -277,8 +285,22 @@ def scan(
     type=float,
     default=1,
 )
+@click.option(
+    "-r",
+    "--resolution-threshold",
+    type=float,
+    help="discard entries with resolution worse than this threshold",
+)
 @click.pass_context
-def show(ctx, correlation_results, selected_classes, top_n, class_image, fraction):
+def show(
+    ctx,
+    correlation_results,
+    selected_classes,
+    top_n,
+    class_image,
+    fraction,
+    resolution_threshold,
+):
     """Parse correlation results and show related emdb entries and plots."""
     import webbrowser
     from inspect import cleandoc
@@ -310,7 +332,13 @@ def show(ctx, correlation_results, selected_classes, top_n, class_image, fractio
         index_col="entry",
     )
 
+    if resolution_threshold is not None:
+        db = pd.read_csv(db_path / "database_summary.csv", sep="\t", index_col=0)
+        keep = db.index[db["resolution"] <= resolution_threshold]
+        df = df.loc[keep]
+
     df.dropna(how="any", inplace=True)
+
     df_indices = df_indices.loc[df.index]
     df_angles = df_angles.loc[df.index]
 

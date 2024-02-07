@@ -370,80 +370,40 @@ def rsync_with_progress(prog, task_desc, remote_path, local_path, dry_run):
     proc.wait()
 
 
-def get_valid_entries(prog, db_path, log, dry_run):
-    entries = sorted(db_path.glob("emd-*.xml"))
-    task = prog.add_task(description="Getting list of maps...", total=len(entries))
+def get_entries_to_download(prog, db_path, log, dry_run, overwrite):
+    db = pd.read_csv(db_path / "database_summary.csv", sep="\t", index_col=0)
+    task = prog.add_task(description="Selecting valid entries...", total=len(db))
+
     to_download = []
-    too_big_or_small = 0
-    too_heavy = 0
-    to_remove = 0
-    for entry_xml in entries:
+    to_extract = []
+    to_project = []
+    for entry_id in db.index:
         prog.update(task, advance=1)
-        entry_id = re.search(r"emd-(\d+)", entry_xml.stem).group(1)
+        proj_path = db_path / f"{entry_id:04}.pt"
+        map_path = db_path / f"emd_{entry_id:04}.map"
+        gz_path = db_path / f"emd_{entry_id:04}.map.gz"
 
-        with open(entry_xml, "rb") as f:
-            entry_metadata = xmltodict.parse(f)
-
-        px_size = np.array(
-            [
-                float(v["#text"])
-                for v in entry_metadata["emd"]["map"]["pixel_spacing"].values()
-            ]
-        )
-        shape = np.array(
-            [int(i) for i in entry_metadata["emd"]["map"]["dimensions"].values()]
-        )
-        shape_square = np.array([np.max(shape)] * 3)
-
-        size_mb = float(entry_metadata["emd"]["map"]["@size_kbytes"]) / 1e3
-        # convert shape to square to check for sizes (will have to happen in processing)
-        volume_padded_GB = np.prod(shape_square) * 32 / 1e9
-        volume_nm = np.prod(np.array(shape_square) * px_size) / 1e3  # nm^3
-        proj_path = db_path / f"{entry_id}.pt"
-        map_path = db_path / f"emd_{entry_id}.map"
-        gz_path = db_path / f"emd_{entry_id}.map.gz"
-        if volume_nm > 3e6 or volume_nm < 1e3 or volume_padded_GB > 3:
-            # rule of thumb: too big or small to be worth working with
-            # discarding less than 5%, so should be good, but we save a lot of issues and bandwidth
-            log.info(f"{entry_id} is too big or small ({volume_nm:.2} nm^3), skipping")
-            too_big_or_small += 1
-            remove = False
-            for pth in (proj_path, map_path, gz_path):
-                if pth.exists():
-                    remove = True
-                    log.warn(f"{pth.name} exists and will be removed")
-                if not dry_run:
-                    pth.unlink(missing_ok=True)
-            to_remove += remove
+        if not overwrite and proj_path.exists():
+            log.info(f"{entry_id} was already projected")
             continue
-        if size_mb > 400:
-            # 300MB is above the 83 percentile (could reduce maybe, but good start)
-            log.info(f"{entry_id}'s file is too heavy ({int(size_mb)} MB), skipping")
-            too_heavy += 1
-            remove = False
-            for pth in (proj_path, map_path, gz_path):
-                if pth.exists():
-                    remove = True
-                    log.warn(f"{pth.name} exists and will be removed")
-                if not dry_run:
-                    pth.unlink(missing_ok=True)
-            to_remove += remove
+        if map_path.exists():
+            log.info(f"{entry_id} was already extracted")
+            to_project.append(map_path)
+            continue
+        if gz_path.exists():
+            log.info(f"{entry_id} was already downloaded")
+            to_extract.append(gz_path)
+            to_project.append(map_path)
             continue
 
-        img_path = db_path / f"emd_{entry_id}.map"
-        gz_path = db_path / f"emd_{entry_id}.map.gz"
+        to_download.append(entry_id)
+        to_extract.append(gz_path)
+        to_project.append(map_path)
 
-        if img_path.exists() or gz_path.exists():
-            log.info(f"{entry_id} was already extracted or downloaded")
-            continue
-        else:
-            to_download.append(entry_id)
-
-    log.warn(f"Will download {len(to_download)}. Will remove {to_remove}.")
-    log.warn(f"Skipping {too_big_or_small} too big/small and {too_heavy} too heavy.")
-    emdb_perc = (len(entries) - too_big_or_small - too_heavy) / len(entries) * 100
-    log.warn(f"Totaling {emdb_perc:.2f}% of the emdb.")
-    return to_download
+    log.warn(f"Will download {len(to_download)}.")
+    log.warn(f"Will extract {len(to_extract)}.")
+    log.warn(f"Will project {len(to_project)}.")
+    return to_download, to_extract, to_project
 
 
 def download_maps(prog, db_path, to_download, dry_run):
@@ -477,14 +437,13 @@ def download_maps(prog, db_path, to_download, dry_run):
             p.kill()
 
 
-def extract_maps(prog, db_path, dry_run):
-    gz_paths = sorted(db_path.glob("*.map.gz"))
+def extract_maps(prog, db_path, to_extract, dry_run):
     if dry_run:
-        print(f"Will extract {len(gz_paths)} maps")
+        print(f"Will extract {len(to_extract)} maps")
         return
-    task = prog.add_task(description="Extracting...", total=len(gz_paths))
+    task = prog.add_task(description="Extracting...", total=len(to_extract))
 
-    for gz_path in gz_paths:
+    for gz_path in to_extract:
         sh.gzip("-d", str(gz_path))
         prog.update(task, advance=1)
 
@@ -520,32 +479,12 @@ def _project_map(map_path, proj_path, save_as_mrc=False):
     return proj_path
 
 
-def project_maps(prog, db_path, overwrite, log, dry_run, threads):
-    maps = list(db_path.glob("*.map"))
-    task = prog.add_task(
-        description="Checking existing projections...", total=len(maps)
-    )
-
-    maps_to_project = []
-    projections = []
-    exist = 0
-    for m in maps:
-        prog.update(task, advance=1)
-        proj = db_path / (re.search(r"\d+", m.stem).group() + ".pt")
-        if proj.exists() and not overwrite:
-            exist += 1
-            continue
-        maps_to_project.append(m)
-        projections.append(proj)
-
+def project_maps(prog, db_path, to_project, log, dry_run, threads):
     if dry_run:
-        print(
-            f"Will project {len(maps_to_project)} maps"
-            + ("" if overwrite else f", skipping {exist} already existing.")
-        )
+        print(f"Will project {len(to_project)} maps")
         return
 
-    task = prog.add_task(description="Projecting...", total=len(maps_to_project))
+    task = prog.add_task(description="Projecting...", total=len(to_project))
 
     torch.set_default_dtype(torch.float32)
     set_start_method("spawn", force=True)
@@ -565,6 +504,9 @@ def project_maps(prog, db_path, overwrite, log, dry_run, threads):
     #     raise ExceptionGroup("Some projections failed", errors)
 
     threads = threads if threads > 0 else os.cpu_count() // 4
+    projections = [
+        db_path / (re.search(r"\d+", m.stem).group() + ".pt") for m in to_project
+    ]
 
     errors = []
     with ProcessPoolExecutor(
@@ -572,7 +514,7 @@ def project_maps(prog, db_path, overwrite, log, dry_run, threads):
     ) as pool:
         results = {
             pool.submit(_project_map, m, p): m
-            for m, p in zip(maps_to_project, projections, strict=True)
+            for m, p in zip(to_project, projections, strict=True)
         }
         for fut in as_completed(results):
             map_file = results[fut].stem
@@ -587,8 +529,15 @@ def project_maps(prog, db_path, overwrite, log, dry_run, threads):
             prog.update(task, advance=1)
 
 
-def _parse_headers(db_path):
-    df = pd.DataFrame(columns=["x", "y", "z", "px_x", "px_y", "px_z", "size_kb"])
+def generate_db_summary(prog, db_path, log, dry_run):
+    entries = list(Path(db_path).glob("*.xml"))
+    task = prog.add_task(
+        description="Generating database summary...", total=len(entries)
+    )
+
+    df = pd.DataFrame(
+        columns=["x", "y", "z", "px_x", "px_y", "px_z", "size_kb", "resolution"]
+    )
     df.astype(
         {
             "x": int,
@@ -598,14 +547,88 @@ def _parse_headers(db_path):
             "px_y": float,
             "px_z": float,
             "size_kb": int,
+            "resolution": float,
         }
     )
-    for xml in Path(db_path).glob("*.xml"):
+
+    bad = 0
+    for xml in entries:
+        prog.update(task, advance=1)
         with open(xml, "rb") as f:
             data = xmltodict.parse(f)
         entry_id = int(re.search(r"emd-(\d+)", xml.stem).group(1))
         shape = [int(i) for i in data["emd"]["map"]["dimensions"].values()]
         px = [float(v["#text"]) for v in data["emd"]["map"]["pixel_spacing"].values()]
         size = int(data["emd"]["map"]["@size_kbytes"])
-        df.loc[entry_id] = [*shape, *px, size]
+        structure_det = data["emd"]["structure_determination_list"][
+            "structure_determination"
+        ]
+        # resolution
+        methods = (
+            "singleparticle",
+            "subtomogram_averaging",
+            "crystallography",
+            "helical",
+            "tomography",
+        )
+        if any(f"{method}_processing" in structure_det for method in methods):
+            pass
+        else:
+            log.info(f"{entry_id} is bad (method = {structure_det['method']})")
+            continue
+
+        errors = []
+        for method in methods:
+            try:
+                processing = structure_det[f"{method}_processing"]
+                if isinstance(processing, list):
+                    processing = processing[0]  # ugly but ok
+                resolution = float(
+                    processing["final_reconstruction"]["resolution"]["#text"]
+                )
+                break
+            except Exception as e:
+                errors.append(e)
+                continue
+        else:
+            bad += 1
+            log.info(
+                f"{entry_id} is bad:\n"
+                + ", ".join(f"{e.__class__.__name__}({e})" for e in errors)
+            )
+            resolution = np.nan
+
+        df.loc[entry_id] = [*shape, *px, size, resolution]
+
+    shape = df[["x", "y", "z"]]
+    max_dim = shape.max(axis=1)
+    size_mb = df["size_kb"] / 1e3
+    # convert shape to square to check for sizes (will have to happen in processing)
+    volume_when_cube = max_dim**3
+    volume_padded_GB = volume_when_cube * 32 / 1e9
+    volume_nm = volume_when_cube * df["px_x"] / 1e3  # nm^3
+
+    too_big_or_small = (volume_nm > 3e6) | (volume_nm < 1e3) | (volume_padded_GB > 3)
+    too_heavy = size_mb > 400
+    anisotropic = (df.px_x != df.px_y) | (df.px_x != df.px_z)
+
+    # discard bad stuff
+    to_discard = too_big_or_small | too_heavy | anisotropic
+    df = df[~to_discard]
+
+    log.warn(
+        f"Found {bad} entries ({100*bad/len(entries):.2f}% of headers) with no sigle particle info."
+    )
+    log.warn(
+        f"{to_discard.sum()} entries were discarded because too heavy, big, or small to process."
+    )
+    df.sort_index(inplace=True)
+    if not dry_run:
+        df.to_csv(
+            db_path / "database_summary.csv",
+            sep="\t",
+            header=True,
+            index=True,
+            na_rep="NaN",
+        )
     return df
