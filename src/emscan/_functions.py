@@ -368,6 +368,7 @@ def rsync_with_progress(prog, task_desc, remote_path, local_path, dry_run):
     )
 
     proc.wait()
+    prog.update(task, completed=100)
 
 
 def get_entries_to_download(prog, db_path, log, dry_run, overwrite):
@@ -426,7 +427,7 @@ def download_maps(prog, db_path, to_download, dry_run):
 
     procs = []
     for entry_id in to_download:
-        sync_path = f"rsync.ebi.ac.uk::pub/databases/emdb/structures/EMD-{entry_id}/map/emd_{entry_id}.map.gz"
+        sync_path = f"rsync.ebi.ac.uk::pub/databases/emdb/structures/EMD-{entry_id:04}/map/emd_{entry_id:04}.map.gz"
         procs.append(run_rsync(sync_path))
 
     try:
