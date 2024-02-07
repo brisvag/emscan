@@ -143,7 +143,7 @@ def gen_db(
     "-a",
     "--angle",
     type=float,
-    default=5,
+    default=2,
     help="Angle step in degrees for cross correlation rotational search",
 )
 @click.option(
@@ -378,9 +378,9 @@ def show(ctx, correlation_results, selected_classes, top_n, class_image, fractio
 
     def get_correct_entry(viewer, event):
         for lay in reversed(viewer.layers):
-            shift = lay._translate_grid[1:]
-            pos = np.array(event.position)[1:]
-            if np.all(pos >= shift):
+            shift = lay._translate_grid[-2:]
+            pos = np.array(event.position)[-2:]
+            if np.all(pos >= shift) and "class" not in lay.name:
                 return lay.name
         return None
 
@@ -388,36 +388,42 @@ def show(ctx, correlation_results, selected_classes, top_n, class_image, fractio
         if event.modifiers:
             return
         entry = get_correct_entry(viewer, event)
-        if entry is not None:
-            webbrowser.open(f"https://www.ebi.ac.uk/emdb/EMD-{entry}")
+        if entry is None:
+            return
+        webbrowser.open(f"https://www.ebi.ac.uk/emdb/EMD-{entry}")
 
     def make_proj_mrc(viewer, event):
         if "Control" not in event.modifiers:
             return
         entry = get_correct_entry(viewer, event)
-        if entry is not None:
-            filename = f"emdb_{entry}_projections.mrc"
-            with mrcfile.new(filename, data=np.array(imgs[int(entry)]).real) as mrc:
-                mrc.voxel_size = 4
-                mrc.set_image_stack()
-            napari.utils.notifications.show_info(f"Saved projections as {filename}")
+        if entry is None:
+            return
+        filename = f"emdb_{entry}_projections.mrc"
+        img = torch.load(db_path / f"{int(entry):04}.pt")
+        with mrcfile.new(filename, data=np.array(img)) as mrc:
+            mrc.voxel_size = 4
+            mrc.set_image_stack()
+        napari.utils.notifications.show_info(f"Saved projections as {filename}")
 
     def open_stack(viewer, event):
         if "Shift" not in event.modifiers:
             return
         entry = get_correct_entry(viewer, event)
+        if entry is None:
+            return
+        img = torch.load(db_path / f"{int(entry):04}.pt")
         v_ = napari.Viewer()
-        for sl in imgs[int(entry)]:
-            v_.add_image(np.array(sl.real), interpolation2d="spline36")
+        for sl in img:
+            v_.add_image(np.array(sl), interpolation2d="spline36")
         v_.grid.enabled = True
 
     print(
         cleandoc(
             """
             TIPS:
-            - double click an image to open its emdb page
-            - ctrl+click to create projection stack
-            - shift+click to open stack exploded in new window
+                - double click an image to open its emdb page
+                - ctrl+click to create projection stack
+                - shift+click to open stack exploded in new window
             """
         )
     )
