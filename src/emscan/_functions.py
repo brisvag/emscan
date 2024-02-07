@@ -358,7 +358,7 @@ def rsync_with_progress(prog, task_desc, remote_path, local_path, dry_run):
             prog.start_task(task)
             prog.update(task, completed=int(match.group(1)))
 
-    rsync = sh.rsync.bake("-rltpvzhu", "--info=progress2")
+    rsync = sh.rsync.bake("-rltpvzhu", "--info=progress2", "--delete")
     proc = rsync(
         remote_path,
         local_path,
