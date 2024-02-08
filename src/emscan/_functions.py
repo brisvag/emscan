@@ -594,16 +594,13 @@ def generate_db_summary(prog, db_path, log, dry_run):
     size_mb = db["size_kb"] / 1e3
     # convert shape to square to check for sizes (will have to happen in processing)
     volume_when_cube = max_dim**3
-    volume_padded_GB = volume_when_cube * 32 / 1e9
+    volume_padded_GB = volume_when_cube * 4 / 1e9
     volume_nm = volume_when_cube * db["px_x"] / 1e3  # nm^3
     rescale_ratio = (db["px_x"] / BIN_RESOLUTION) ** 3
     volume_rescaled_GB = volume_padded_GB * rescale_ratio
 
     too_big_or_small = (
-        (volume_nm > 3e6)
-        | (volume_nm < 1e3)
-        | (volume_padded_GB > 2)
-        | (volume_rescaled_GB > 2)
+        (volume_nm < 1e3) | (volume_padded_GB > 1) | (volume_rescaled_GB > 1)
     )
     too_heavy = size_mb > 400
     anisotropic = (db.px_x != db.px_y) | (db.px_x != db.px_z)

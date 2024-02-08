@@ -112,7 +112,6 @@ def gen_db(
             )
             generate_db_summary(prog=prog, db_path=db_path, log=log, dry_run=dry_run)
 
-        to_project = None
         if maps or list_:
             to_download, to_extract, to_project = get_entries_to_process(
                 prog=prog,
