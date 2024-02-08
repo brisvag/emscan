@@ -227,7 +227,8 @@ def scan(
         output = Path(output).expanduser().resolve()
 
     print("Loading database list...")
-    entries = sorted(db_path.glob("*.pt"))
+    db = pd.read_csv(db_path / "database_summary.csv", sep="\t", index_col=0)
+    entries = [db_path / f"{entry_id:04}.pt" for entry_id in db.index]
 
     add_header = True
     exist = []
