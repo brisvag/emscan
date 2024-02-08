@@ -8,7 +8,6 @@ from itertools import chain
 from math import ceil, floor
 from operator import mul
 from pathlib import Path
-from threading import Semaphore
 
 import healpy
 import mrcfile
@@ -371,7 +370,7 @@ def rsync_with_progress(prog, task_desc, remote_path, local_path, dry_run):
     prog.update(task, completed=100)
 
 
-def get_entries_to_download(prog, db_path, log, dry_run, overwrite):
+def get_entries_to_process(prog, db_path, log, dry_run, overwrite):
     db = pd.read_csv(db_path / "database_summary.csv", sep="\t", index_col=0)
     task = prog.add_task(description="Selecting valid entries...", total=len(db))
 
@@ -386,20 +385,18 @@ def get_entries_to_download(prog, db_path, log, dry_run, overwrite):
 
         if not overwrite and proj_path.exists():
             log.info(f"{entry_id} was already projected")
-            continue
-        if map_path.exists():
+        elif map_path.exists():
             log.info(f"{entry_id} was already extracted")
             to_project.append(map_path)
-            continue
-        if gz_path.exists():
+        elif gz_path.exists():
             log.info(f"{entry_id} was already downloaded")
             to_extract.append(gz_path)
             to_project.append(map_path)
-            continue
-
-        to_download.append(entry_id)
-        to_extract.append(gz_path)
-        to_project.append(map_path)
+        else:
+            log.info(f"{entry_id} will be downloaded")
+            to_download.append(entry_id)
+            to_extract.append(gz_path)
+            to_project.append(map_path)
 
     log.warn(f"Will download {len(to_download)}.")
     log.warn(f"Will extract {len(to_extract)}.")
@@ -415,27 +412,18 @@ def download_maps(prog, db_path, to_download, dry_run):
 
     rsync = sh.rsync.bake("-rltpvzhu", "--info=progress2")
 
-    pool = Semaphore(10)
-
     def done(cmd, success, exit_code):
-        pool.release()
         prog.update(task, advance=1, refresh=True)
 
-    def run_rsync(source_path):
-        pool.acquire()
-        return rsync(source_path, db_path, _bg=True, _done=done)
-
-    procs = []
+    failed_download = []
     for entry_id in to_download:
         sync_path = f"rsync.ebi.ac.uk::pub/databases/emdb/structures/EMD-{entry_id:04}/map/emd_{entry_id:04}.map.gz"
-        procs.append(run_rsync(sync_path))
+        try:
+            rsync(sync_path, db_path, _done=done)
+        except sh.ErrorReturnCode:
+            failed_download.append(entry_id)
 
-    try:
-        for p in procs:
-            p.wait()
-    except sh.ErrorReturnCode:
-        for p in procs:
-            p.kill()
+    return failed_download
 
 
 def extract_maps(prog, db_path, to_extract, dry_run):
@@ -523,7 +511,7 @@ def project_maps(prog, db_path, to_project, log, dry_run, threads):
                 err = fut.exception()
                 err.add_note(map_file)
                 errors.append(err)
-                log.warn(f"failed projecting {map_file}")
+                log.warn(f"failed projecting {map_file}: {err}")
             else:
                 proj_path = fut.result()
                 log.info(f"finished projecting {proj_path.stem}")
@@ -536,10 +524,10 @@ def generate_db_summary(prog, db_path, log, dry_run):
         description="Generating database summary...", total=len(entries)
     )
 
-    df = pd.DataFrame(
+    db = pd.DataFrame(
         columns=["x", "y", "z", "px_x", "px_y", "px_z", "size_kb", "resolution"]
     )
-    df.astype(
+    db.astype(
         {
             "x": int,
             "y": int,
@@ -599,23 +587,30 @@ def generate_db_summary(prog, db_path, log, dry_run):
             )
             resolution = np.nan
 
-        df.loc[entry_id] = [*shape, *px, size, resolution]
+        db.loc[entry_id] = [*shape, *px, size, resolution]
 
-    shape = df[["x", "y", "z"]]
+    shape = db[["x", "y", "z"]]
     max_dim = shape.max(axis=1)
-    size_mb = df["size_kb"] / 1e3
+    size_mb = db["size_kb"] / 1e3
     # convert shape to square to check for sizes (will have to happen in processing)
     volume_when_cube = max_dim**3
     volume_padded_GB = volume_when_cube * 32 / 1e9
-    volume_nm = volume_when_cube * df["px_x"] / 1e3  # nm^3
+    volume_nm = volume_when_cube * db["px_x"] / 1e3  # nm^3
+    rescale_ratio = (db["px_x"] / BIN_RESOLUTION) ** 3
+    volume_rescaled_GB = volume_padded_GB * rescale_ratio
 
-    too_big_or_small = (volume_nm > 3e6) | (volume_nm < 1e3) | (volume_padded_GB > 3)
+    too_big_or_small = (
+        (volume_nm > 3e6)
+        | (volume_nm < 1e3)
+        | (volume_padded_GB > 2)
+        | (volume_rescaled_GB > 2)
+    )
     too_heavy = size_mb > 400
-    anisotropic = (df.px_x != df.px_y) | (df.px_x != df.px_z)
+    anisotropic = (db.px_x != db.px_y) | (db.px_x != db.px_z)
 
     # discard bad stuff
     to_discard = too_big_or_small | too_heavy | anisotropic
-    df = df[~to_discard]
+    db = db[~to_discard]
 
     log.warn(
         f"Found {bad} entries ({100*bad/len(entries):.2f}% of headers) with no sigle particle info."
@@ -623,13 +618,13 @@ def generate_db_summary(prog, db_path, log, dry_run):
     log.warn(
         f"{to_discard.sum()} entries were discarded because too heavy, big, or small to process."
     )
-    df.sort_index(inplace=True)
+    db.sort_index(inplace=True)
     if not dry_run:
-        df.to_csv(
+        db.to_csv(
             db_path / "database_summary.csv",
             sep="\t",
             header=True,
             index=True,
             na_rep="NaN",
         )
-    return df
+    return db

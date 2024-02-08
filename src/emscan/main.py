@@ -82,13 +82,14 @@ def gen_db(
     if not list_ and not maps and not projections:
         raise click.UsageError("Must provide at least -l or -p or -m.")
 
+    import pandas as pd
     from rich.progress import Progress
 
     from emscan._functions import (
         download_maps,
         extract_maps,
         generate_db_summary,
-        get_entries_to_download,
+        get_entries_to_process,
         project_maps,
         rsync_with_progress,
     )
@@ -111,17 +112,52 @@ def gen_db(
             )
             generate_db_summary(prog=prog, db_path=db_path, log=log, dry_run=dry_run)
 
+        to_project = None
         if maps or list_:
-            to_download, to_extract, to_project = get_entries_to_download(
+            to_download, to_extract, to_project = get_entries_to_process(
                 prog=prog,
                 db_path=db_path,
                 log=log,
                 dry_run=dry_run,
                 overwrite=overwrite,
             )
-            download_maps(
+            failed = download_maps(
                 prog=prog, db_path=db_path, to_download=to_download, dry_run=dry_run
             )
+
+            if failed:
+                extract_remove = []
+                project_remove = []
+                log.warn("some headers are outdated, updating database")
+                for entry_id in failed:
+                    log.info(f"deleting missing entry: {entry_id}")
+                    header = db_path / f"emd-{entry_id:04}-v30.xml"
+                    gz_path = db_path / f"emd_{entry_id:04}.map.gz"
+                    map_path = db_path / f"emd_{entry_id:04}.map"
+                    proj_path = db_path / f"{entry_id:04}.pt"
+
+                    header.unlink(missing_ok=True)
+                    map_path.unlink(missing_ok=True)
+                    proj_path.unlink(missing_ok=True)
+
+                    extract_remove.append(gz_path)
+                    project_remove.append(map_path)
+
+                to_extract = [p for p in to_extract if p not in extract_remove]
+                to_project = [p for p in to_project if p not in project_remove]
+
+                db = pd.read_csv(
+                    db_path / "database_summary.csv", sep="\t", index_col=0
+                )
+                db.drop(failed, inplace=True)
+                db.to_csv(
+                    db_path / "database_summary.csv",
+                    sep="\t",
+                    header=True,
+                    index=True,
+                    na_rep="NaN",
+                )
+
             extract_maps(
                 prog=prog, db_path=db_path, to_extract=to_extract, dry_run=dry_run
             )
