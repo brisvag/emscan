@@ -298,11 +298,11 @@ def compute_ncc(S, entry_path, angle_step=5):
             # normalize to avoid needing std and mean in ncc calculation
             cls_rot = normalize(cls_rot)
             # also correlate transposed image, because we only have half a sphere of projections
-            for cls_flip in (cls_rot, cls_rot.T):
+            for cls_flip, flip_sign in ((cls_rot, 1), (cls_rot.T, -1)):
                 S_ = ft_and_shift(cls_flip)
                 ccs = ncc(S_).amax(dim=(1, 2))
                 best_ccs, replaced = torch.max(torch.stack([best_ccs, ccs]), dim=0)
-                best_ang[replaced == 1] = angle
+                best_ang[replaced == 1] = angle * flip_sign
                 del S_, ccs
             del cls_rot
 

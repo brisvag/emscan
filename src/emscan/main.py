@@ -370,7 +370,8 @@ def show(
 
     if resolution_threshold is not None:
         db = pd.read_csv(db_path / "database_summary.csv", sep="\t", index_col=0)
-        keep = db.index[db["resolution"] <= resolution_threshold]
+        keep = db.index[db["resolution"] <= resolution_threshold]  # also excludes NaNs
+        keep = keep[keep.isin(df.index)]
         df = df.loc[keep]
 
     df.dropna(how="any", inplace=True)
@@ -422,7 +423,10 @@ def show(
     for entry in uniq_entries:
         img = torch.load(db_path / f"{entry:04}.pt")
         img = img[df_indices.loc[entry, "best"]]
-        imgs[entry] = rotate_by(img, -df_angles.loc[entry, "best"])
+        angle = df_angles.loc[entry, "best"]
+        if np.sign(angle) == -1:
+            img = img.T
+        imgs[entry] = rotate_by(img, -np.abs(angle))
 
     max_size = np.max([img.shape for img in imgs.values()], axis=0)
     for entry, img in imgs.items():
@@ -430,9 +434,7 @@ def show(
 
     if class_image is not None:
         classes_data = load_class_data(class_image, device="cpu", fraction=fraction)
-        classes_data = np.array(
-            pad_to(classes_data, (1, *max_size), dim=(1, 2)).real.squeeze()
-        )
+        classes_data = np.array(pad_to(classes_data, (1, *max_size), dim=(1, 2)).real)
         for i, d in enumerate(classes_data):
             if str(i) in selected:
                 v.add_image(d, name=f"class {i}", interpolation2d="spline36")
