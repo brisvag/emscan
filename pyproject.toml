@@ -25,7 +25,7 @@ dynamic = ["version"]
 dependencies = [
     "click",
     "healpy",
-    "morphosamplers",
+    "morphosamplers>=0.0.13",
     "mrcfile",
     "numpy",
     "pandas",

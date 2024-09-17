@@ -260,7 +260,7 @@ def compute_ncc(S, entry_path, angle_step=5):
     corr_results = {"values": {}, "indices": {}, "angles": {}}
 
     # see link above for what is L, LL, S, U, and the equation
-    L = torch.load(entry_path, map_location=S.device)
+    L = torch.load(entry_path, map_location=S.device, weights_only=True)
 
     if S.shape[-1] < L.shape[-1]:
         # crop L

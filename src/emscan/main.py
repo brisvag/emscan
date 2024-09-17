@@ -50,38 +50,39 @@ def cli(ctx, db_path, overwrite, verbose, dry_run):
 
 @cli.command()
 @click.option(
-    "-l", "--list", "list_", is_flag=True, help="Update the list of entry headers."
-)
-@click.option(
-    "-m",
-    "--maps",
-    is_flag=True,
-    help="Download the emdb maps from the available headers.",
-)
-@click.option(
-    "-p",
-    "--projections",
-    is_flag=True,
-    help="Generate projections for all the available maps.",
-)
-@click.option(
     "-t",
     "--threads",
     default=0,
     help="How many threads to use for projection. If <= 0, guess a good number.",
 )
+@click.option(
+    "-l", "--list-only", is_flag=True, help="Update the list of entry headers."
+)
+@click.option(
+    "-d", "--database-only", is_flag=True, help="Update the database table itself."
+)
+@click.option(
+    "-m",
+    "--maps-only",
+    is_flag=True,
+    help="Download the emdb maps from the available headers.",
+)
+@click.option(
+    "-p",
+    "--projections-only",
+    is_flag=True,
+    help="Generate projections for all the available maps.",
+)
 @click.pass_context
 def gen_db(
     ctx,
-    list_,
-    maps,
-    projections,
     threads,
+    list_only,
+    database_only,
+    maps_only,
+    projections_only,
 ):
     """Generate the projection database."""
-    if not list_ and not maps and not projections:
-        raise click.UsageError("Must provide at least -l or -p or -m.")
-
     import pandas as pd
     from rich.progress import Progress
 
@@ -101,8 +102,10 @@ def gen_db(
 
     EMDB_HEADERS = "rsync.ebi.ac.uk::pub/databases/emdb/structures/*/header/*v30.xml"
 
+    full = not any((list_only, database_only, maps_only, projections_only))
+
     with Progress(disable=False) as prog:
-        if list_:
+        if full or list_only:
             rsync_with_progress(
                 prog,
                 task_desc="Updating header database...",
@@ -110,9 +113,11 @@ def gen_db(
                 local_path=db_path,
                 dry_run=dry_run,
             )
+
+        if full or database_only:
             generate_db_summary(prog=prog, db_path=db_path, log=log, dry_run=dry_run)
 
-        if maps or list_:
+        if full or maps_only or projections_only:
             to_download, to_extract, to_project = get_entries_to_process(
                 prog=prog,
                 db_path=db_path,
@@ -120,6 +125,8 @@ def gen_db(
                 dry_run=dry_run,
                 overwrite=overwrite,
             )
+
+        if full or maps_only:
             failed = download_maps(
                 prog=prog, db_path=db_path, to_download=to_download, dry_run=dry_run
             )
@@ -161,7 +168,7 @@ def gen_db(
                 prog=prog, db_path=db_path, to_extract=to_extract, dry_run=dry_run
             )
 
-        if projections or maps or list_:
+        if full or projections_only:
             project_maps(
                 prog=prog,
                 db_path=db_path,
@@ -421,7 +428,7 @@ def show(
 
     imgs = {}
     for entry in uniq_entries:
-        img = torch.load(db_path / f"{entry:04}.pt")
+        img = torch.load(db_path / f"{entry:04}.pt", weights_only=True)
         img = img[df_indices.loc[entry, "best"]]
         angle = df_angles.loc[entry, "best"]
         if np.sign(angle) == -1:
@@ -465,7 +472,7 @@ def show(
         if entry is None:
             return
         filename = f"emdb_{entry}_projections.mrc"
-        img = torch.load(db_path / f"{int(entry):04}.pt")
+        img = torch.load(db_path / f"{int(entry):04}.pt", weights_only=True)
         with mrcfile.new(filename, data=np.array(img)) as mrc:
             mrc.voxel_size = 4
             mrc.set_image_stack()
@@ -477,7 +484,7 @@ def show(
         entry = get_correct_entry(viewer, event)
         if entry is None:
             return
-        img = torch.load(db_path / f"{int(entry):04}.pt")
+        img = torch.load(db_path / f"{int(entry):04}.pt", weights_only=True)
         v_ = napari.Viewer()
         for sl in img:
             v_.add_image(np.array(sl), interpolation2d="spline36")
@@ -534,7 +541,7 @@ def view_entries(ctx, entries, class_image):
         for i, d in enumerate(classes_data):
             imgs[f"class {i}"] = d[None]
     for entry in entries:
-        imgs[entry] = torch.load(db_path / f"{entry:04}.pt")
+        imgs[entry] = torch.load(db_path / f"{entry:04}.pt", weights_only=True)
     max_size = np.max([img.shape for img in imgs.values()], axis=0)
     for entry, img in imgs.items():
         img = np.array(pad_to(img, max_size, dim=(1, 2))).real.squeeze()
