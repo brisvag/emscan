@@ -184,12 +184,6 @@ def gen_db(
     "classes", type=click.Path(exists=True, dir_okay=False, resolve_path=True)
 )
 @click.option(
-    "-o",
-    "--output",
-    type=click.Path(dir_okay=False, file_okay=True),
-    help="Output json file with the cc data. [default: <CLASSES_NAME>.csv]",
-)
-@click.option(
     "-a",
     "--angle",
     type=float,
@@ -205,7 +199,6 @@ def gen_db(
 def scan(
     ctx,
     classes,
-    output,
     angle,
     fraction,
 ):
@@ -228,10 +221,7 @@ def scan(
     overwrite = ctx.obj["overwrite"]
     log = ctx.obj["log"]
 
-    if output is None:
-        output = Path(classes).with_suffix(".csv")
-    else:
-        output = Path(output).expanduser().resolve()
+    output = Path(classes).with_suffix(".csv")
 
     print("Loading database list...")
     db = pd.read_csv(db_path / "database_summary.csv", sep="\t", index_col=0)
@@ -307,7 +297,7 @@ def scan(
 
 @cli.command()
 @click.argument(
-    "correlation_results",
+    "class_image",
     type=click.Path(exists=True, dir_okay=False, resolve_path=True),
 )
 @click.option(
@@ -317,12 +307,6 @@ def scan(
     help="comma separated list of classes to select. All if empty.",
 )
 @click.option("-n", "--top-n", default=30, type=int, help="How many top hits to show.")
-@click.option(
-    "-c",
-    "--class-image",
-    type=click.Path(exists=True, dir_okay=False, resolve_path=True),
-    help="Image that was used for the correlation.",
-)
 @click.option(
     "--fraction",
     type=float,
@@ -337,10 +321,9 @@ def scan(
 @click.pass_context
 def show(
     ctx,
-    correlation_results,
+    class_image,
     selected_classes,
     top_n,
-    class_image,
     fraction,
     resolution_threshold,
 ):
@@ -362,7 +345,7 @@ def show(
     db_path = ctx.obj["db_path"]
     ctx.obj["overwrite"]
 
-    correlation_results = Path(correlation_results)
+    correlation_results = Path(class_image).with_suffix('.csv')
     df = pd.read_csv(correlation_results, sep="\t", index_col="entry")
     df_indices = pd.read_csv(
         correlation_results.with_stem(f"{correlation_results.stem}_indices"),

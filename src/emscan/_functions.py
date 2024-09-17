@@ -88,7 +88,7 @@ def rotate_by(arr, ang, center=None):
 
     return rotate(
         arr[None],
-        ang,
+        float(ang),
         center=center,
         interpolation=InterpolationMode.BILINEAR,
     )[0]
@@ -152,10 +152,10 @@ def rotated_projection_fts(ft):
     # TODO: sinc function to avoid edge artifacts
 
     rot = _rotations_hemisphere_fibonacci()
-    pos = np.array(ft.shape) // 2  # // needed to center ctf for odd images
+    pos = np.array(ft.shape) // 2  # using // is needed to center ctf for odd images
     grid_size = (ft.shape[0], ft.shape[0], 1)
     slices = sample_subvolumes(
-        np.array(ft), positions=pos, orientations=rot, grid_shape=grid_size
+        np.array(ft), positions=pos, orientations=rot, grid_shape=grid_size, fill_value=0,
     ).squeeze()
 
     return torch.from_numpy(slices)
@@ -247,7 +247,7 @@ def crop_or_pad_from_px_sizes(ft, px_size_in, px_size_out, dim=None):
     return resize(ft, target_shape, dim=dim)
 
 
-def compute_ncc(S, entry_path, angle_step=5):
+def _ncc(S, L, angle_step):
     """Fast cross correlation of all elements of projections and the image.
 
     Performs also rotations and mirroring to cover all orientations.
@@ -257,10 +257,8 @@ def compute_ncc(S, entry_path, angle_step=5):
     Optimized to reduce operations (FFTs are precomputed and images are pre-normalized).
     Some stuff is also easier because L[0] and S are forced to have the same shape if S is big.
     """
-    corr_results = {"values": {}, "indices": {}, "angles": {}}
-
     # see link above for what is L, LL, S, U, and the equation
-    L = torch.load(entry_path, map_location=S.device, weights_only=True)
+    corr_results = {"values": {}, "indices": {}, "angles": {}}
 
     if S.shape[-1] < L.shape[-1]:
         # crop L
@@ -313,6 +311,12 @@ def compute_ncc(S, entry_path, angle_step=5):
         del cls, best_ccs, best_cc, best_ang
     del L_, S, denom
     return corr_results
+
+
+def compute_ncc(S, entry_path, angle_step=5):
+    """Small wrapper for _ncc to load entry in the proper gpu."""
+    L = torch.load(entry_path, map_location=S.device, weights_only=True)
+    return _ncc(S, L, angle_step)
 
 
 def load_class_data(cls_path, device=None, fraction=1):
