@@ -387,17 +387,17 @@ def get_entries_to_process(prog, db_path, log, dry_run, overwrite):
         map_path = db_path / f"emd_{entry_id:04}.map"
         gz_path = db_path / f"emd_{entry_id:04}.map.gz"
 
-        if not overwrite and proj_path.exists():
-            log.info(f"{entry_id} was already projected")
+        if proj_path.exists():
+            log.info(f"{entry_id:04} was already projected")
         elif map_path.exists():
-            log.info(f"{entry_id} was already extracted")
+            log.info(f"{entry_id:04} was already extracted")
             to_project.append(map_path)
         elif gz_path.exists():
-            log.info(f"{entry_id} was already downloaded")
+            log.info(f"{entry_id:04} was already downloaded")
             to_extract.append(gz_path)
             to_project.append(map_path)
         else:
-            log.info(f"{entry_id} will be downloaded")
+            log.info(f"{entry_id:04} is new")
             to_download.append(entry_id)
             to_extract.append(gz_path)
             to_project.append(map_path)
@@ -567,7 +567,7 @@ def generate_db_summary(prog, db_path, log, dry_run):
         if any(f"{method}_processing" in structure_det for method in methods):
             pass
         else:
-            log.info(f"{entry_id} is bad (method = {structure_det['method']})")
+            log.info(f"{entry_id:04} is bad (method = {structure_det['method']})")
             continue
 
         errors = []
@@ -586,7 +586,7 @@ def generate_db_summary(prog, db_path, log, dry_run):
         else:
             bad += 1
             log.info(
-                f"{entry_id} is bad:\n"
+                f"{entry_id:04} is bad:\n"
                 + ", ".join(f"{e.__class__.__name__}({e})" for e in errors)
             )
             resolution = np.nan
