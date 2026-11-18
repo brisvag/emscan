@@ -29,7 +29,7 @@ dependencies = [
     "mrcfile",
     "numpy",
     "pandas",
-    "pydantic<2",
+    "pydantic",
     "rich",
     "scipy",
     "sh",
@@ -37,7 +37,7 @@ dependencies = [
     "torchvision",
     "xmltodict",
     "plotly",
-    "napari[all,pyqt5]",
+    "napari[all]",
 ]
 
 # extras
