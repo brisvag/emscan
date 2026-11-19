@@ -548,22 +548,7 @@ def generate_db_summary(prog, db_path, log, dry_run):
         description="Generating database summary...", total=len(entries)
     )
 
-    db = pd.DataFrame(
-        columns=["x", "y", "z", "px_x", "px_y", "px_z", "size_kb", "resolution"]
-    )
-    db = db.astype(
-        {
-            "x": int,
-            "y": int,
-            "z": int,
-            "px_x": float,
-            "px_y": float,
-            "px_z": float,
-            "size_kb": int,
-            "resolution": float,
-        }
-    )
-
+    rows = {}
     bad = 0
     for xml in entries:
         prog.update(task, advance=1)
@@ -611,7 +596,25 @@ def generate_db_summary(prog, db_path, log, dry_run):
             )
             resolution = np.nan
 
-        db.loc[entry_id] = [*shape, *px, size, resolution]
+        rows[entry_id] = [*shape, *px, size, resolution]
+
+    db = pd.DataFrame.from_dict(
+        rows,
+        orient="index",
+        columns=["x", "y", "z", "px_x", "px_y", "px_z", "size_kb", "resolution"],
+    )
+    db = db.astype(
+        {
+            "x": int,
+            "y": int,
+            "z": int,
+            "px_x": float,
+            "px_y": float,
+            "px_z": float,
+            "size_kb": int,
+            "resolution": float,
+        }
+    )
 
     shape = db[["x", "y", "z"]]
     max_dim = shape.max(axis=1)
