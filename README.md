@@ -37,6 +37,10 @@ emscan gen-db -h
 
 Read the help messages for more specific information on the various parameters.
 
+### Locked dependencies
+
+If you read this from the future (hi!) and are having dependency issues, you might prefer to install from source with `uv sync`, using the uv.lock in the repository.
+
 ## Usage
 
 Using emscan requires a 3 step process:
