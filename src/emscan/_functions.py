@@ -1,3 +1,4 @@
+import requests
 import gc
 import inspect
 import os
@@ -412,6 +413,7 @@ def download_headers(prog, db_path, dry_run):
             f"Will update header list (currently have {len(list(db_path.glob('*.xml')))} headers)."
         )
         return
+
     task = prog.add_task(description="Downloading headers...", total=None)
 
     rsync = sh.rsync.bake("-rltpvzhu", "--info=progress2")
@@ -419,9 +421,17 @@ def download_headers(prog, db_path, dry_run):
     def done(cmd, success, exit_code):
         prog.update(task, advance=1, refresh=True)
 
+
+    full_list_url = "https://ftp.ebi.ac.uk/pub/databases/emdb/status/latest/emdb_released_holdings.json"
+
+    response = requests.get(full_list_url, timeout=60)
+    response.raise_for_status()
+
+    entries = response.json().keys()
+
     failed_download = []
-    for entry_id in range(0, 999):
-        sync_path = f"rsync.ebi.ac.uk::pub/databases/emdb/structures/EMD-{entry_id:04}/header/*v30.xml"
+    for entry_id in entries:
+        sync_path = f"rsync.ebi.ac.uk::pub/databases/emdb/structures/EMD-{entry_id}/header/emd-{entry_id}-v30.xml"
         try:
             rsync(sync_path, db_path, _done=done)
         except sh.ErrorReturnCode:
