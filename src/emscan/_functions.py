@@ -360,8 +360,10 @@ def load_class_data(cls_path, device=None, fraction=1):
     class_data = ift_and_shift(class_ft, dim=(1, 2)).real
 
     if fraction < 1:
-        cropped_shape = (np.array(class_data.shape) * fraction).round().astype(int)
-        class_data = crop_to(class_data, cropped_shape, dim=(1, 2))
+        cropped_shape = (np.array(class_data.shape[1:]) * fraction).round().astype(int)
+        class_data = crop_to(
+            class_data, (class_data.shape[0], *cropped_shape), dim=(1, 2)
+        )
         class_data *= gaussian_window(class_data.shape[1:], device=device)
 
     class_data = normalize(class_data, dim=(1, 2))
@@ -398,9 +400,9 @@ def get_entries_to_process(prog, db_path, log, overwrite):
             to_extract.append(gz_path)
             to_project.append(map_path)
 
-    log.warn(f"Will download {len(to_download)}.")
-    log.warn(f"Will extract {len(to_extract)}.")
-    log.warn(f"Will project {len(to_project)}.")
+    log.warning(f"Will download {len(to_download)}.")
+    log.warning(f"Will extract {len(to_extract)}.")
+    log.warning(f"Will project {len(to_project)}.")
     return to_download, to_extract, to_project
 
 
@@ -511,7 +513,7 @@ def project_maps(prog, db_path, to_project, log, dry_run, threads):
     #     except Exception as e:
     #         e.add_note(m.stem)
     #         errors.append(e)
-    #         log.warn(f"failed projecting {p.stem}")
+    #         log.warning(f"failed projecting {p.stem}")
     #     prog.update(task, advance=1)
     # if errors:
     #     raise ExceptionGroup("Some projections failed", errors)
@@ -535,7 +537,7 @@ def project_maps(prog, db_path, to_project, log, dry_run, threads):
                 err = fut.exception()
                 err.add_note(map_file)
                 errors.append(err)
-                log.warn(f"failed projecting {map_file}: {err}")
+                log.warning(f"failed projecting {map_file}: {err}")
             else:
                 proj_path = fut.result()
                 log.info(f"finished projecting {proj_path.stem}")
@@ -636,10 +638,10 @@ def generate_db_summary(prog, db_path, log, dry_run):
     to_discard = too_big_or_small | too_heavy | anisotropic
     db = db[~to_discard]
 
-    log.warn(
+    log.warning(
         f"Found {bad} entries ({100*bad/len(entries):.2f}% of headers) with no single particle info."
     )
-    log.warn(
+    log.warning(
         f"{to_discard.sum()} entries were discarded because too heavy, big, or small to process."
     )
     db.sort_index(inplace=True)

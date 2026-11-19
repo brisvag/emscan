@@ -137,7 +137,7 @@ def gen_db(
             if failed:
                 extract_remove = []
                 project_remove = []
-                log.warn("some headers are outdated, updating database")
+                log.warning("some headers are outdated, updating database")
                 for entry_id in failed:
                     log.info(f"deleting missing entry: {entry_id}")
                     header = db_path / f"emd-{entry_id:04}-v30.xml"
@@ -230,10 +230,10 @@ def scan(
     add_header = True
     if output.exists():
         if overwrite:
-            log.warn(f"{output.name} exists and will be overwritten.")
+            log.warning(f"{output.name} exists and will be overwritten.")
         else:
             exist = pd.read_csv(output, sep="\t", index_col=0).index
-            log.warn(
+            log.warning(
                 f"{output.name} already esists: ({len(exist)}/{len(entries)}) entries already processed."
             )
 
@@ -270,7 +270,7 @@ def scan(
                         err = fut.exception()
                         err.add_note(entry_id)
                         errors.append(err)
-                        log.warn(f"failed correlating {entry_id}: {err}")
+                        log.warning(f"failed correlating {entry_id}: {err}")
                     else:
                         cc_dict = fut.result()
                         log.info(f"finished correlating to {entry_id}")
@@ -421,13 +421,12 @@ def show(
     for entry, img in imgs.items():
         imgs[entry] = np.array(pad_to(img, max_size, dim=(0, 1))).real.squeeze()
 
-    if class_image is not None:
-        classes_data = load_class_data(class_image, device="cpu", fraction=fraction)
-        classes_data = np.array(pad_to(classes_data, (1, *max_size), dim=(1, 2)).real)
-        for i, d in enumerate(classes_data):
-            if str(i) in selected:
-                l = v.add_image(d, name=f"class {i}", interpolation2d="spline36")
-                l.name_overlay.visible = True
+    classes_data = load_class_data(class_image, device="cpu", fraction=fraction)
+    classes_data = np.array(pad_to(classes_data, (1, *max_size), dim=(1, 2)).real)
+    for i, d in enumerate(classes_data):
+        if str(i) in selected:
+            l = v.add_image(d, name=f"class {i}", interpolation2d="spline36")
+            l.name_overlay.visible = True
 
     for entry, img in imgs.items():
         l = v.add_image(img, name=f"{entry:04}", interpolation2d="spline36")
