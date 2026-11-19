@@ -502,7 +502,7 @@ def project_maps(prog, db_path, to_project, log, dry_run, threads):
     # if errors:
     #     raise ExceptionGroup("Some projections failed", errors)
 
-    threads = threads if threads > 0 else os.cpu_count() // 4
+    threads = threads if threads > 0 else max(1, (os.cpu_count() or 1) // 4)
     projections = [
         db_path / (re.search(r"\d+", m.stem).group() + ".pt") for m in to_project
     ]
@@ -537,7 +537,7 @@ def generate_db_summary(prog, db_path, log, dry_run):
     db = pd.DataFrame(
         columns=["x", "y", "z", "px_x", "px_y", "px_z", "size_kb", "resolution"]
     )
-    db.astype(
+    db = db.astype(
         {
             "x": int,
             "y": int,
@@ -605,7 +605,7 @@ def generate_db_summary(prog, db_path, log, dry_run):
     # convert shape to square to check for sizes (will have to happen in processing)
     volume_when_cube = max_dim**3
     volume_padded_GB = volume_when_cube * 4 / 1e9
-    volume_nm = volume_when_cube * db["px_x"] / 1e3  # nm^3
+    volume_nm = volume_when_cube * db["px_x"] ** 3 / 1e3  # nm^3
     rescale_ratio = (db["px_x"] / BIN_RESOLUTION) ** 3
     volume_rescaled_GB = volume_padded_GB * rescale_ratio
 

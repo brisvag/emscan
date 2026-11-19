@@ -244,7 +244,8 @@ def scan(
             add_header = False
 
     set_start_method("spawn", force=True)
-    devices = torch.cuda.device_count()
+    use_cuda = torch.cuda.is_available()
+    devices = torch.cuda.device_count() if use_cuda else 1
 
     errors = []
     with Progress() as prog:
@@ -254,7 +255,9 @@ def scan(
             # pre-load class data for each gpu
             cls_data = {
                 device: load_class_data(
-                    classes, device=f"cuda:{device}", fraction=fraction
+                    classes,
+                    device=f"cuda:{device}" if use_cuda else "cpu",
+                    fraction=fraction,
                 )
                 for device in range(devices)
             }
@@ -528,11 +531,12 @@ def view_entries(ctx, entries, class_image):
         for i, d in enumerate(classes_data):
             imgs[f"class {i}"] = d[None]
     for entry in entries:
-        imgs[entry] = torch.load(db_path / f"{entry:04}.pt", weights_only=True)
+        key = f"{int(entry):04}"
+        imgs[key] = torch.load(db_path / f"{key}.pt", weights_only=True)
     max_size = np.max([img.shape for img in imgs.values()], axis=0)
     for entry, img in imgs.items():
         img = np.array(pad_to(img, max_size, dim=(1, 2))).real.squeeze()
-        l = v.add_image(img, name=f"{entry:04}", interpolation2d="spline36")
+        l = v.add_image(img, name=entry, interpolation2d="spline36")
         l.name_overlay.visible = True
 
     v.canvas.grid.enabled = True
