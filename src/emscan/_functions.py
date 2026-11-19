@@ -278,24 +278,27 @@ def _ncc(S, L, angle_step):
         S = normalize(S, dim=(1, 2), inplace=False)
 
     L_ = ft_and_shift(L, dim=(1, 2))
+    L_conj = L_.conj()
     LL_ = ft_and_shift(L**2, dim=(1, 2))
     N = S[0].nelement()
     # TODO this is just zeros with N in the center
     U_ = ft_and_shift(torch.ones_like(S[0], device=S.device))
 
-    def _cc(ft1, ft2):
-        return ift_and_shift(ft1 * ft2.conj(), dim=(1, 2)).real
+    def _cc(ft1, ft2, ft2_is_conj=False):
+        conj = ft2 if ft2_is_conj else ft2.conj()
+        return ift_and_shift(ft1 * conj, dim=(1, 2)).real
 
     denom_inner = (N * _cc(U_, LL_)) - (_cc(U_, L_) ** 2)
     denom = torch.sqrt(torch.clamp_min(denom_inner, 0))
     n_proj = len(L)
 
-    del L, LL_, U_
+    del L, L_, LL_, U_
 
     def ncc(S_):
-        nonlocal denom, L_
+        nonlocal denom, L_conj
         # NOTE: this assume S is ft of normalized image (std=1, mean=0)
-        return _cc(S_, L_) / denom
+        # NOTE: L_conj is precomputed to save computations!
+        return _cc(S_, L_conj, ft2_is_conj=True) / denom
 
     for cls_idx, cls in enumerate(S):
         best_ccs = torch.zeros(n_proj, device=S.device)
@@ -318,7 +321,7 @@ def _ncc(S, L, angle_step):
         corr_results["indices"][cls_idx] = best_idx.item()
         corr_results["angles"][cls_idx] = best_ang[best_idx.item()].item()
         del cls, best_ccs, best_cc, best_ang
-    del L_, S, denom
+    del L_conj, S, denom
     return corr_results
 
 
