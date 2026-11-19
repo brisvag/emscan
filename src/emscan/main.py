@@ -249,41 +249,47 @@ def scan(
         task = prog.add_task(description="Correlating...", total=len(entries))
         # with Pool(processes=devices) as pool:
         with ProcessPoolExecutor(max_workers=devices) as pool:
-            futures = {
-                pool.submit(
-                    compute_ncc,
-                    classes,
-                    entry,
-                    angle,
-                    f"cuda:{idx % devices}" if use_cuda else "cpu",
-                    fraction,
-                ): entry
-                for idx, entry in enumerate(entries)
-            }
-            for fut in as_completed(futures):
-                entry_id = futures[fut].stem
-                if fut.exception():
-                    err = fut.exception()
-                    err.add_note(entry_id)
-                    errors.append(err)
-                    log.warn(f"failed correlating {entry_id}: {err}")
-                else:
-                    cc_dict = fut.result()
-                    log.info(f"finished correlating to {entry_id}")
-                    for k, v in cc_dict.items():
-                        if k != "values":
-                            out = output.with_stem(f"{output.stem}_{k}")
-                        else:
-                            out = output
-                        if out.exists() and overwrite:
-                            out.unlink()
-                        df = pd.DataFrame(v, index=pd.Index([entry_id], name="entry"))
-                        df.to_csv(
-                            out, sep="\t", header=add_header, index=True, mode="a"
-                        )
-                    add_header = False  # so we only add once
-                    overwrite = False
-                prog.update(task, advance=1)
+            # submit in batches so the pending queue stays small on large databases
+            batch_size = max(devices * 4, 1)
+            for start in range(0, len(entries), batch_size):
+                batch = entries[start : start + batch_size]
+                futures = {
+                    pool.submit(
+                        compute_ncc,
+                        classes,
+                        entry,
+                        angle,
+                        f"cuda:{idx % devices}" if use_cuda else "cpu",
+                        fraction,
+                    ): entry
+                    for idx, entry in enumerate(batch, start)
+                }
+                for fut in as_completed(futures):
+                    entry_id = futures[fut].stem
+                    if fut.exception():
+                        err = fut.exception()
+                        err.add_note(entry_id)
+                        errors.append(err)
+                        log.warn(f"failed correlating {entry_id}: {err}")
+                    else:
+                        cc_dict = fut.result()
+                        log.info(f"finished correlating to {entry_id}")
+                        for k, v in cc_dict.items():
+                            if k != "values":
+                                out = output.with_stem(f"{output.stem}_{k}")
+                            else:
+                                out = output
+                            if out.exists() and overwrite:
+                                out.unlink()
+                            df = pd.DataFrame(
+                                v, index=pd.Index([entry_id], name="entry")
+                            )
+                            df.to_csv(
+                                out, sep="\t", header=add_header, index=True, mode="a"
+                            )
+                        add_header = False  # so we only add once
+                        overwrite = False
+                    prog.update(task, advance=1)
 
     if errors:
         raise ExceptionGroup("Some correlations failed", errors)
