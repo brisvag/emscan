@@ -84,7 +84,8 @@ def ift_and_shift(img, dim=None):
 
 def rotate_by(arr, ang, center=None):
     if center is None:
-        center = list(np.array(arr.shape) // 2)
+        # torchvision expects the center as (x, y), i.e. (col, row)
+        center = list(np.array(arr.shape)[::-1] // 2)
 
     return rotate(
         arr[None],
