@@ -355,7 +355,7 @@ def load_class_data(cls_path, device=None, fraction=1):
     return class_data
 
 
-def get_entries_to_process(prog, db_path, log, dry_run, overwrite):
+def get_entries_to_process(prog, db_path, log, overwrite):
     db = pd.read_csv(db_path / "database_summary.csv", sep="\t", index_col=0)
     task = prog.add_task(description="Selecting valid entries...", total=len(db))
 
@@ -368,7 +368,8 @@ def get_entries_to_process(prog, db_path, log, dry_run, overwrite):
         map_path = db_path / f"emd_{entry_id:04}.map"
         gz_path = db_path / f"emd_{entry_id:04}.map.gz"
 
-        if proj_path.exists():
+        # only projection should ever need overwriting
+        if proj_path.exists() and not overwrite:
             log.info(f"{entry_id:04} was already projected")
         elif map_path.exists():
             log.info(f"{entry_id:04} was already extracted")

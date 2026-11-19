@@ -126,7 +126,6 @@ def gen_db(
                 prog=prog,
                 db_path=db_path,
                 log=log,
-                dry_run=dry_run,
                 overwrite=overwrite,
             )
 
