@@ -183,18 +183,21 @@ def crop_to(img, target_shape, dim=None):
     if dim is None:
         dim = tuple(range(img.ndim))
     # ensure we round the cropping correctly to keeo the center in the right place
-    if img.shape[0] % 2:
-        round_left, round_right = floor, ceil
-    else:
-        round_left, round_right = ceil, floor
     edge_crop = (np.array(img.shape) - np.array(target_shape)) / 2
-    crop_left = tuple(
-        round_left(edge_crop[d]) or None if d in dim else None for d in range(img.ndim)
-    )
-    crop_right = tuple(
-        -round_right(edge_crop[d]) or None if d in dim else None
-        for d in range(img.ndim)
-    )
+    crop_left = []
+    crop_right = []
+    for d in range(img.ndim):
+        if d not in dim:
+            crop_left.append(None)
+            crop_right.append(None)
+            continue
+        # rounding must depend on the parity of the dimension being cropped
+        if img.shape[d] % 2:
+            left, right = floor(edge_crop[d]), ceil(edge_crop[d])
+        else:
+            left, right = ceil(edge_crop[d]), floor(edge_crop[d])
+        crop_left.append(left or None)
+        crop_right.append(-right or None)
     crop_slice = tuple(
         slice(*crops) for crops in zip(crop_left, crop_right, strict=True)
     )
@@ -205,17 +208,21 @@ def pad_to(img, target_shape, dim=None, value=0):
     if dim is None:
         dim = tuple(range(img.ndim))
     # ensure we round the padding correctly to keeo the center in the right place
-    if img.shape[0] % 2:
-        round_left, round_right = ceil, floor
-    else:
-        round_left, round_right = floor, ceil
     edge_pad = (np.array(target_shape) - np.array(img.shape)) / 2
-    pad_left = tuple(
-        round_left(edge_pad[d]) if d in dim else 0 for d in range(img.ndim)
-    )
-    pad_right = tuple(
-        round_right(edge_pad[d]) if d in dim else 0 for d in range(img.ndim)
-    )
+    pad_left = []
+    pad_right = []
+    for d in range(img.ndim):
+        if d not in dim:
+            pad_left.append(0)
+            pad_right.append(0)
+            continue
+        # rounding must depend on the parity of the dimension being padded
+        if img.shape[d] % 2:
+            left, right = ceil(edge_pad[d]), floor(edge_pad[d])
+        else:
+            left, right = floor(edge_pad[d]), ceil(edge_pad[d])
+        pad_left.append(left)
+        pad_right.append(right)
     padding = tuple(chain.from_iterable(zip(pad_right, pad_left, strict=True)))[::-1]
     padded = torch.nn.functional.pad(img, padding, value=value)
     return padded
