@@ -1,4 +1,3 @@
-from emscan._functions import download_headers
 import click
 
 import emscan
@@ -89,6 +88,7 @@ def gen_db(
     from rich.text import Text
 
     from emscan._functions import (
+        download_headers,
         download_maps,
         extract_maps,
         generate_db_summary,
@@ -104,6 +104,8 @@ def gen_db(
     full = not any((list_only, database_only, maps_only, projections_only))
 
     class CompletedColumn(ProgressColumn):
+        """Add progress count even when no total is available."""
+
         def render(self, task):
             if task.total is None:
                 return Text(f"{task.completed}/?", style="cyan")
@@ -230,7 +232,6 @@ def scan(
     entries = [db_path / f"{entry_id:04}.pt" for entry_id in db.index]
 
     add_header = True
-    exist = []
     if output.exists():
         if overwrite:
             log.warn(f"{output.name} exists and will be overwritten.")
@@ -372,7 +373,6 @@ def show(
     df_angles = df_angles.loc[df.index]
 
     df_selected = pd.DataFrame()
-    selected = []
     if not selected_classes:
         selected_classes = "all"
         selected = list(df.columns)
@@ -473,7 +473,7 @@ def show(
         v_ = napari.Viewer()
         for sl in img:
             v_.add_image(np.array(sl), interpolation2d="spline36")
-        v_.grid.enabled = True
+        v_.canvas.grid.enabled = True
 
     print(
         cleandoc(
@@ -490,8 +490,8 @@ def show(
     v.mouse_drag_callbacks.append(make_proj_mrc)
     v.mouse_drag_callbacks.append(open_stack)
 
-    v.grid.enabled = True
-    v.grid.stride = -1
+    v.canvas.grid.enabled = True
+    v.canvas.grid.stride = -1
     napari.run()
 
 
@@ -532,8 +532,8 @@ def view_entries(ctx, entries, class_image):
         img = np.array(pad_to(img, max_size, dim=(1, 2))).real.squeeze()
         v.add_image(img, name=f"{entry:04}", interpolation2d="spline36")
 
-    v.grid.enabled = True
-    v.grid.stride = -1
+    v.canvas.grid.enabled = True
+    v.canvas.grid.stride = -1
     napari.run()
 
 
