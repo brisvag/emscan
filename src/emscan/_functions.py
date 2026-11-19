@@ -471,8 +471,8 @@ def _project_map(map_path, proj_path, save_as_mrc=False):
     proj = normalize(proj, dim=(1, 2))
 
     if save_as_mrc:
-        with mrcfile.new(proj_path, proj, overwrite=True) as mrc:
-            mrc.voxel_size = px_size
+        with mrcfile.new(proj_path, np.asarray(proj), overwrite=True) as mrc:
+            mrc.voxel_size = BIN_RESOLUTION
     else:
         torch.save(proj, proj_path)
     return proj_path
