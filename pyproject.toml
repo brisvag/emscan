@@ -17,18 +17,22 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Natural Language :: English",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 dynamic = ["version"]
 dependencies = [
+    "PyOpenGL-accelerate",
     "click",
     "healpy",
     "morphosamplers>=0.0.13",
     "mrcfile",
+    "napari[all]>=0.10.0",
     "numpy",
     "pandas",
+    "plotly",
     "pydantic",
     "rich",
     "scipy",
@@ -36,8 +40,6 @@ dependencies = [
     "torch",
     "torchvision",
     "xmltodict",
-    "plotly",
-    "napari[all]>=0.10.0",
 ]
 
 # extras

@@ -429,17 +429,20 @@ def show(
         classes_data = np.array(pad_to(classes_data, (1, *max_size), dim=(1, 2)).real)
         for i, d in enumerate(classes_data):
             if str(i) in selected:
-                v.add_image(d, name=f"class {i}", interpolation2d="spline36")
+                l = v.add_image(d, name=f"class {i}", interpolation2d="spline36")
+                l.name_overlay.visible = True
 
     for entry, img in imgs.items():
-        v.add_image(img, name=f"{entry:04}", interpolation2d="spline36")
+        l = v.add_image(img, name=f"{entry:04}", interpolation2d="spline36")
+        l.name_overlay.visible = True
 
     def get_correct_entry(viewer, event):
-        for lay in reversed(viewer.layers):
-            shift = lay._translate_grid[-2:]
-            pos = np.array(event.position)[-2:]
-            if np.all(pos >= shift) and "class" not in lay.name:
-                return lay.name
+        event.handled = True
+        if event.viewbox == (0, 0):
+            return None
+        layers = viewer.canvas.grid.contents_at(event.viewbox, viewer.layers)
+        if layers:
+            return viewer.layers[layers[0]].name
         return None
 
     def open_entry(viewer, event):
@@ -491,7 +494,7 @@ def show(
     v.mouse_drag_callbacks.append(open_stack)
 
     v.canvas.grid.enabled = True
-    v.canvas.grid.stride = -1
+    v.reset_view()
     napari.run()
 
 
@@ -530,10 +533,12 @@ def view_entries(ctx, entries, class_image):
     max_size = np.max([img.shape for img in imgs.values()], axis=0)
     for entry, img in imgs.items():
         img = np.array(pad_to(img, max_size, dim=(1, 2))).real.squeeze()
-        v.add_image(img, name=f"{entry:04}", interpolation2d="spline36")
+        l = v.add_image(img, name=f"{entry:04}", interpolation2d="spline36")
+        l.name_overlay.visible = True
 
     v.canvas.grid.enabled = True
     v.canvas.grid.stride = -1
+    v.reset_view()
     napari.run()
 
 
