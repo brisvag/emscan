@@ -35,6 +35,8 @@ or for a specific subcommand:
 emscan gen-db -h
 ```
 
+Read the help messages for more specific information on the various parameters.
+
 ## Usage
 
 Using emscan requires a 3 step process:
@@ -47,9 +49,23 @@ Note that all need to know _where_ your database lives. By default it will be pu
 To do so, the 3 main commands are:
 
 ```sh
-emscan --db-path <some_path> gen-db -lmp
-emscan --db-path <some_path> scan some_map.mrc
-emscan --db-path <some_path> show some_map.mrc
+emscan --db-path <my_db_path> gen-db
+emscan --db-path <my_db_path> scan <some_2d_class>.mrc
+emscan --db-path <my_db_path> show <some_2d_class>.mrc
 ```
 
-Read the help messages for more information on parameters.
+Note that `<some_2d_class.mrc>` can actually be a stack of 2D classes!
+
+Since `scan` saves the correlation results for each class individually, you can mix and match various cross-correlation results when running `show`.
+For example, if you suspect that two or more different classes might be different views of the same object, put all of them in a stack, e.g. `stack.mrc`. In that case:
+
+```sh
+emscan --db-path <my_db_path> show stack.mrc
+```
+
+will show the *combined score* of all classes, meaning that EMDB entries that can match well against *all* classes will be at the top. You can select a different subset (eg, the 0th and 3rd one) of classes to see different combinations with:
+
+```sh
+emscan --db-path <my_db_path> show stack.mrc -s 0,3
+```
+
