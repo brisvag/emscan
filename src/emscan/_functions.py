@@ -286,7 +286,8 @@ def _ncc(S, L, angle_step):
     def _cc(ft1, ft2):
         return ift_and_shift(ft1 * ft2.conj(), dim=(1, 2)).real
 
-    denom = torch.sqrt((N * _cc(U_, LL_)) - (_cc(U_, L_) ** 2))
+    denom_inner = (N * _cc(U_, LL_)) - (_cc(U_, L_) ** 2)
+    denom = torch.sqrt(torch.clamp_min(denom_inner, 0))
     n_proj = len(L)
 
     del L, LL_, U_
