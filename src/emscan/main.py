@@ -1,3 +1,4 @@
+from emscan._functions import download_headers
 import click
 
 import emscan
@@ -84,7 +85,8 @@ def gen_db(
 ):
     """Generate the projection database."""
     import pandas as pd
-    from rich.progress import Progress
+    from rich.progress import Progress, ProgressColumn
+    from rich.text import Text
 
     from emscan._functions import (
         download_maps,
@@ -92,7 +94,6 @@ def gen_db(
         generate_db_summary,
         get_entries_to_process,
         project_maps,
-        rsync_with_progress,
     )
 
     db_path = ctx.obj["db_path"]
@@ -100,19 +101,20 @@ def gen_db(
     log = ctx.obj["log"]
     dry_run = ctx.obj["dry_run"]
 
-    EMDB_HEADERS = "rsync.ebi.ac.uk::pub/databases/emdb/structures/*/header/*v30.xml"
-
     full = not any((list_only, database_only, maps_only, projections_only))
 
-    with Progress(disable=False) as prog:
+    class CompletedColumn(ProgressColumn):
+        def render(self, task):
+            if task.total is None:
+                return Text(f"{task.completed}/?", style="cyan")
+            return Text("")
+
+    with Progress(*Progress.get_default_columns(), CompletedColumn(), disable=False) as prog:
         if full or list_only:
-            rsync_with_progress(
-                prog,
-                task_desc="Updating header database...",
-                remote_path=EMDB_HEADERS,
-                local_path=db_path,
-                dry_run=dry_run,
-            )
+            no_header = download_headers(prog, db_path=db_path, dry_run=dry_run)
+            if no_header:
+                for entry_id in no_header:
+                    log.info(f"entry {entry_id} failed.")
 
         if full or database_only:
             generate_db_summary(prog=prog, db_path=db_path, log=log, dry_run=dry_run)

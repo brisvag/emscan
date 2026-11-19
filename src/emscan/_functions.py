@@ -346,34 +346,6 @@ def load_class_data(cls_path, device=None, fraction=1):
     return class_data
 
 
-def rsync_with_progress(prog, task_desc, remote_path, local_path, dry_run):
-    if dry_run:
-        print(
-            f"Will update header list (currently have {len(list(local_path.glob('*.xml')))} headers)."
-        )
-        return
-
-    task = prog.add_task(description=task_desc, start=False)
-    percent = re.compile(r"(\d+)%")
-
-    def _process_output(task, line):
-        if match := percent.search(line):
-            prog.start_task(task)
-            prog.update(task, completed=int(match.group(1)))
-
-    rsync = sh.rsync.bake("-rltpvzhu", "--info=progress2", "--delete")
-    proc = rsync(
-        remote_path,
-        local_path,
-        _out=partial(_process_output, task),
-        _err=print,
-        _bg=True,
-    )
-
-    proc.wait()
-    prog.update(task, completed=100)
-
-
 def get_entries_to_process(prog, db_path, log, dry_run, overwrite):
     db = pd.read_csv(db_path / "database_summary.csv", sep="\t", index_col=0)
     task = prog.add_task(description="Selecting valid entries...", total=len(db))
@@ -408,11 +380,35 @@ def get_entries_to_process(prog, db_path, log, dry_run, overwrite):
     return to_download, to_extract, to_project
 
 
+def download_headers(prog, db_path, dry_run):
+    if dry_run:
+        print(
+            f"Will update header list (currently have {len(list(db_path.glob('*.xml')))} headers)."
+        )
+        return
+    task = prog.add_task(description="Downloading headers...", total=None)
+
+    rsync = sh.rsync.bake("-rltpvzhu", "--info=progress2")
+
+    def done(cmd, success, exit_code):
+        prog.update(task, advance=1, refresh=True)
+
+    failed_download = []
+    for entry_id in range(0, 999):
+        sync_path = f"rsync.ebi.ac.uk::pub/databases/emdb/structures/EMD-{entry_id:04}/header/*v30.xml"
+        try:
+            rsync(sync_path, db_path, _done=done)
+        except sh.ErrorReturnCode:
+            failed_download.append(entry_id)
+
+    return failed_download
+
+
 def download_maps(prog, db_path, to_download, dry_run):
     if dry_run:
         print(f"Will download {len(to_download)} maps")
         return
-    task = prog.add_task(description="Downloading...", total=len(to_download))
+    task = prog.add_task(description="Downloading maps...", total=len(to_download))
 
     rsync = sh.rsync.bake("-rltpvzhu", "--info=progress2")
 
@@ -614,7 +610,7 @@ def generate_db_summary(prog, db_path, log, dry_run):
     db = db[~to_discard]
 
     log.warn(
-        f"Found {bad} entries ({100*bad/len(entries):.2f}% of headers) with no sigle particle info."
+        f"Found {bad} entries ({100*bad/len(entries):.2f}% of headers) with no single particle info."
     )
     log.warn(
         f"{to_discard.sum()} entries were discarded because too heavy, big, or small to process."
