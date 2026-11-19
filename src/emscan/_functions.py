@@ -169,8 +169,8 @@ def gaussian_window(shape, sigmas=None, device=None):
     sigmas = np.broadcast_to(sigmas, len(shape))
     windows = [gaussian(n, s) for n, s in zip(shape, sigmas, strict=True)]
     mins = np.array([min(w) for w in windows])
-    maxs = np.array([max(w) for w in windows])
-    zero = np.max(mins * maxs.reshape(-1, 1))
+    # true minimum of the separable product, so the window reaches exactly 0
+    zero = np.prod(mins)
     tensors = [torch.tensor(w, device=device) for w in np.ix_(*windows)]
     window = reduce(mul, tensors)
     window -= zero
