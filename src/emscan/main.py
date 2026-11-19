@@ -215,10 +215,7 @@ def scan(
     from rich.progress import Progress
     from torch.multiprocessing import set_start_method
 
-    from emscan._functions import (
-        compute_ncc,
-        load_class_data,
-    )
+    from emscan._functions import compute_ncc
 
     db_path = ctx.obj["db_path"]
     overwrite = ctx.obj["overwrite"]
@@ -252,22 +249,14 @@ def scan(
         task = prog.add_task(description="Correlating...", total=len(entries))
         # with Pool(processes=devices) as pool:
         with ProcessPoolExecutor(max_workers=devices) as pool:
-            # pre-load class data for each gpu
-            cls_data = {
-                device: load_class_data(
-                    classes,
-                    device=f"cuda:{device}" if use_cuda else "cpu",
-                    fraction=fraction,
-                )
-                for device in range(devices)
-            }
-
             futures = {
                 pool.submit(
                     compute_ncc,
-                    cls_data[idx % devices],
+                    classes,
                     entry,
                     angle,
+                    f"cuda:{idx % devices}" if use_cuda else "cpu",
+                    fraction,
                 ): entry
                 for idx, entry in enumerate(entries)
             }

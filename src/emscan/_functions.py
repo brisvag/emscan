@@ -322,8 +322,19 @@ def _ncc(S, L, angle_step):
     return corr_results
 
 
-def compute_ncc(S, entry_path, angle_step=5):
-    """Small wrapper for _ncc to load entry in the proper gpu."""
+_CLASS_CACHE: dict = {}
+
+
+def compute_ncc(cls_path, entry_path, angle_step=5, device=None, fraction=1):
+    """Small wrapper for _ncc to load entry in the proper gpu.
+
+    Class data is loaded once per worker process and reused across entries, so only a
+    small key crosses the process boundary instead of the full tensor.
+    """
+    key = (str(cls_path), device, fraction)
+    if key not in _CLASS_CACHE:
+        _CLASS_CACHE[key] = load_class_data(cls_path, device=device, fraction=fraction)
+    S = _CLASS_CACHE[key]
     L = torch.load(entry_path, map_location=S.device, weights_only=True)
     return _ncc(S, L, angle_step)
 
