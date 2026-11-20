@@ -367,6 +367,7 @@ def get_entries_to_process(prog, db_path, log, overwrite):
     to_download = []
     to_extract = []
     to_project = []
+    to_delete = []
     for entry_id in db.index:
         prog.update(task, advance=1)
         proj_path = db_path / f"{entry_id:04}.pt"
@@ -376,6 +377,8 @@ def get_entries_to_process(prog, db_path, log, overwrite):
         # only projection should ever need overwriting
         if proj_path.exists() and not overwrite:
             log.info(f"{entry_id:04} was already projected")
+            if map_path.exists():
+                to_delete.append(map_path)
         elif map_path.exists():
             log.info(f"{entry_id:04} was already extracted")
             to_project.append(map_path)
@@ -392,7 +395,7 @@ def get_entries_to_process(prog, db_path, log, overwrite):
     log.warning(f"Will download {len(to_download)}.")
     log.warning(f"Will extract {len(to_extract)}.")
     log.warning(f"Will project {len(to_project)}.")
-    return to_download, to_extract, to_project
+    return to_download, to_extract, to_project, to_delete
 
 
 def download_headers(prog, db_path, dry_run):

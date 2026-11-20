@@ -136,12 +136,18 @@ def gen_db(
             generate_db_summary(prog=prog, db_path=db_path, log=log, dry_run=dry_run)
 
         if full or maps or projections:
-            to_download, to_extract, to_project = get_entries_to_process(
+            to_download, to_extract, to_project, to_delete = get_entries_to_process(
                 prog=prog,
                 db_path=db_path,
                 log=log,
                 overwrite=overwrite,
             )
+            if (full or projections) and not keep_maps:
+                if dry_run:
+                    print(f"Will delete {len(to_delete)} maps with existing projections")
+                else:
+                    for map_path in to_delete:
+                        map_path.unlink(missing_ok=True)
 
         if full or maps:
             failed = []
