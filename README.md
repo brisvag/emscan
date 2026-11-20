@@ -6,7 +6,9 @@
 [![CI](https://github.com/brisvag/emscan/actions/workflows/ci.yml/badge.svg)](https://github.com/brisvag/emscan/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/brisvag/emscan/branch/main/graph/badge.svg)](https://codecov.io/gh/brisvag/emscan)
 
-emscan is a command line and GUI tool that can be used to cross-correlate 2D projections of unkown objects against the entirety[^1] of the [EMDB](https://www.ebi.ac.uk/emdb). For example, it can be used to find existing homologous (also partial) complexes of unknown particle picks from a cell-extract shotgun cryo-em experiment.
+emscan is a command line and GUI tool that can be used to cross-correlate 2D projections of unkown objects against the entirety[^1] of the [EMDB](https://www.ebi.ac.uk/emdb). For example, it can be used to find existing homologous (also partial) complexes of unknown particle picks from a cell-extract shotgun cryo-em experiment:
+
+<img width="1091" height="656" alt="Results of a scan with a limited database subset containing a real hit." src="https://github.com/user-attachments/assets/d3b23e9e-09d0-4514-972d-a06cbb9814d3" />
 
 [^1]: not _quite_: some entries are (clearly) discarded in a few specific cases; some parameters allow tweaking this selection.
 
