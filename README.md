@@ -10,10 +10,9 @@ emscan is a command line and GUI tool that can be used to cross-correlate 2D pro
 
 [^1]: not _quite_: some entries are (clearly) discarded in a few specific cases; some parameters allow tweaking this selection.
 
-## _Disclaimers_
+## _Disclaimer_
 
-- emscan requires a _large_ amount of space to run. While you won't store the whole EMDB (entries are stored downsampled, pre-projected and with limited rotational resolution), it will still require several TBs of space.
-- the first runs are much much slower than the usual run: downloading and generating the full database might require days. However, scanning individual projections against the full database should only take hours.
+emscan requires a lot of time to set up (~days for the first gen-db run) and a large amount of space. While you won't store the whole EMDB (entries are stored downsampled, pre-projected and with limited rotational resolution), it will still use up potentially up to TBs of space.
 
 ## Installation
 
