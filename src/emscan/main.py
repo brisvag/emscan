@@ -450,12 +450,12 @@ def show(
     classes_data = np.array(pad_to(classes_data, (1, *max_size), dim=(1, 2)).real)
     for i, d in enumerate(classes_data):
         if str(i) in selected:
-            l = v.add_image(d, name=f"class {i}", interpolation2d="spline36")
-            l.name_overlay.visible = True
+            layer = v.add_image(d, name=f"class {i}", interpolation2d="spline36")
+            layer.name_overlay.visible = True
 
     for entry, img in imgs.items():
-        l = v.add_image(img, name=f"{entry:04}", interpolation2d="spline36")
-        l.name_overlay.visible = True
+        layer = v.add_image(img, name=f"{entry:04}", interpolation2d="spline36")
+        layer.name_overlay.visible = True
 
     def get_correct_entry(viewer, event):
         event.handled = True
@@ -555,8 +555,8 @@ def view_entries(ctx, entries, class_image):
     max_size = np.max([img.shape for img in imgs.values()], axis=0)
     for entry, img in imgs.items():
         img = np.array(pad_to(img, max_size, dim=(1, 2))).real.squeeze()
-        l = v.add_image(img, name=entry, interpolation2d="spline36")
-        l.name_overlay.visible = True
+        layer = v.add_image(img, name=entry, interpolation2d="spline36")
+        layer.name_overlay.visible = True
 
     v.canvas.grid.enabled = True
     v.canvas.grid.stride = -1

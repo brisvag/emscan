@@ -1,10 +1,9 @@
-import requests
 import gc
 import inspect
 import os
 import re
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from functools import lru_cache, partial, reduce
+from functools import lru_cache, reduce
 from itertools import chain
 from math import ceil, floor
 from operator import mul
@@ -13,6 +12,7 @@ from pathlib import Path
 import mrcfile
 import numpy as np
 import pandas as pd
+import requests
 import sh
 import torch
 import xmltodict
