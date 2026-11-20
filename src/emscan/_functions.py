@@ -3,7 +3,7 @@ import gc
 import inspect
 import os
 import re
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from functools import lru_cache, partial, reduce
 from itertools import chain
 from math import ceil, floor
@@ -439,37 +439,45 @@ def download_headers(prog, db_path, dry_run):
     return failed_download
 
 
-def download_maps(prog, db_path, to_download, dry_run):
+def fetch_maps(*, prog, db_path, to_download, to_extract, dry_run, threads, failed):
+    """Download and extract maps, yielding map paths as soon as they're ready.
+
+    Failed entries are appended to failed and skipped.
+    """
     if dry_run:
         print(f"Will download {len(to_download)} maps")
-        return
-    task = prog.add_task(description="Downloading maps...", total=len(to_download))
+        print(f"Will extract {len(to_extract)} maps")
+        return iter(())
+
+    dl_task = prog.add_task(description="Downloading maps...", total=len(to_download))
+    ex_task = prog.add_task(description="Extracting...", total=len(to_extract))
 
     rsync = sh.rsync.bake("-rltpvzhu", "--info=progress2")
+    download_ids = set(to_download)
 
-    def done(cmd, success, exit_code):
-        prog.update(task, advance=1, refresh=True)
-
-    failed_download = []
-    for entry_id in to_download:
-        sync_path = f"rsync.ebi.ac.uk::pub/databases/emdb/structures/EMD-{entry_id:04}/map/emd_{entry_id:04}.map.gz"
-        try:
-            rsync(sync_path, db_path, _done=done)
-        except sh.ErrorReturnCode:
-            failed_download.append(entry_id)
-
-    return failed_download
-
-
-def extract_maps(prog, db_path, to_extract, dry_run):
-    if dry_run:
-        print(f"Will extract {len(to_extract)} maps")
-        return
-    task = prog.add_task(description="Extracting...", total=len(to_extract))
-
-    for gz_path in to_extract:
+    def fetch(gz_path):
+        entry_id = int(re.search(r"\d+", gz_path.stem).group())
+        if entry_id in download_ids:
+            sync_path = f"rsync.ebi.ac.uk::pub/databases/emdb/structures/EMD-{entry_id:04}/map/emd_{entry_id:04}.map.gz"
+            try:
+                rsync(sync_path, db_path)
+            except sh.ErrorReturnCode:
+                failed.append(entry_id)
+                return None
+            prog.update(dl_task, advance=1)
         sh.gzip("-d", str(gz_path))
-        prog.update(task, advance=1)
+        prog.update(ex_task, advance=1)
+        return gz_path.with_suffix("")
+
+    def ready():
+        with ThreadPoolExecutor(max_workers=threads) as pool:
+            futures = [pool.submit(fetch, gz) for gz in to_extract]
+            for fut in as_completed(futures):
+                map_path = fut.result()
+                if map_path is not None:
+                    yield map_path
+
+    return ready()
 
 
 def _project_map(map_path, proj_path, save_as_mrc=False):
@@ -503,54 +511,51 @@ def _project_map(map_path, proj_path, save_as_mrc=False):
     return proj_path
 
 
-def project_maps(prog, db_path, to_project, log, dry_run, threads):
+def _project_map_file(map_path):
+    """Project a map into its sibling <entry_id>.pt projection file."""
+    entry_id = re.search(r"\d+", map_path.stem).group()
+    return _project_map(map_path, map_path.with_name(f"{entry_id}.pt"))
+
+
+def project_maps(*, prog, maps, log, dry_run, threads, keep_maps, total):
     if dry_run:
-        print(f"Will project {len(to_project)} maps")
+        print(f"Will project {total} maps")
         return
 
-    task = prog.add_task(description="Projecting...", total=len(to_project))
+    task = prog.add_task(description="Projecting...", total=total)
 
     torch.set_default_dtype(torch.float32)
     set_start_method("spawn", force=True)
-
-    # # single-threaded for testing
-    # errors = []
-    # for m, p in zip(maps_to_project, projections, strict=True):
-    #     try:
-    #         _project_map(m, p)
-    #         log.info(f"finished projecting {p.stem}")
-    #     except Exception as e:
-    #         e.add_note(m.stem)
-    #         errors.append(e)
-    #         log.warning(f"failed projecting {p.stem}")
-    #     prog.update(task, advance=1)
-    # if errors:
-    #     raise ExceptionGroup("Some projections failed", errors)
-
-    threads = threads if threads > 0 else max(1, (os.cpu_count() or 1) // 4)
-    projections = [
-        db_path / (re.search(r"\d+", m.stem).group() + ".pt") for m in to_project
-    ]
 
     errors = []
     with ProcessPoolExecutor(
         max_workers=threads, initializer=os.nice, initargs=(10,)
     ) as pool:
-        results = {
-            pool.submit(_project_map, m, p): m
-            for m, p in zip(to_project, projections, strict=True)
-        }
-        for fut in as_completed(results):
-            map_file = results[fut].stem
+        results = {}
+
+        def finish(fut):
+            map_path = results.pop(fut)
             if fut.exception():
                 err = fut.exception()
-                err.add_note(map_file)
+                err.add_note(map_path.stem)
                 errors.append(err)
-                log.warning(f"failed projecting {map_file}: {err}")
+                log.warning(f"failed projecting {map_path.stem}: {err}")
             else:
                 proj_path = fut.result()
                 log.info(f"finished projecting {proj_path.stem}")
+                if not keep_maps:
+                    # keep the map on failure so a retry need not re-download it
+                    map_path.unlink(missing_ok=True)
             prog.update(task, advance=1)
+
+        # drain finished projections while the download/extract stream still feeds us
+        for map_path in maps:
+            for fut in tuple(results):
+                if fut.done():
+                    finish(fut)
+            results[pool.submit(_project_map_file, map_path)] = map_path
+        for fut in as_completed(results):
+            finish(fut)
 
 
 def generate_db_summary(prog, db_path, log, dry_run):

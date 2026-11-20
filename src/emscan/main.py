@@ -56,41 +56,53 @@ def cli(ctx, db_path, overwrite, verbose, dry_run):
     help="How many threads to use for projection. If <= 0, guess a good number.",
 )
 @click.option(
-    "-l", "--list-only", is_flag=True, help="Update the list of entry headers."
+    "-h", "--headers", is_flag=True, help="Download or update the entry headers."
 )
 @click.option(
-    "-d", "--database-only", is_flag=True, help="Update the database table itself."
+    "-d", "--database", is_flag=True, help="Update the database table itself."
 )
 @click.option(
     "-m",
-    "--maps-only",
+    "--maps",
     is_flag=True,
-    help="Download the emdb maps from the available headers.",
+    help="Download or update the emdb maps from the available headers.",
 )
 @click.option(
     "-p",
-    "--projections-only",
+    "--projections",
     is_flag=True,
     help="Generate projections for all the available maps.",
+)
+@click.option(
+    "--keep-maps",
+    is_flag=True,
+    help="Keep the downloaded maps after projecting (for development purposes).",
 )
 @click.pass_context
 def gen_db(
     ctx,
     threads,
-    list_only,
-    database_only,
-    maps_only,
-    projections_only,
+    headers,
+    database,
+    maps,
+    projections,
+    keep_maps,
 ):
-    """Generate the projection database."""
+    """Generate the projection database.
+
+    If none of l, d, m, or p optionns are passed, all are executed.
+    Otherwise, only the the options passed.
+    """
+    import os
+    from itertools import chain
+
     import pandas as pd
     from rich.progress import Progress, ProgressColumn
     from rich.text import Text
 
     from emscan._functions import (
         download_headers,
-        download_maps,
-        extract_maps,
+        fetch_maps,
         generate_db_summary,
         get_entries_to_process,
         project_maps,
@@ -101,7 +113,9 @@ def gen_db(
     log = ctx.obj["log"]
     dry_run = ctx.obj["dry_run"]
 
-    full = not any((list_only, database_only, maps_only, projections_only))
+    full = not any((headers, database, maps, projections))
+
+    threads = threads if threads > 0 else max(1, (os.cpu_count() or 1) // 4)
 
     class CompletedColumn(ProgressColumn):
         """Add progress count even when no total is available."""
@@ -112,16 +126,16 @@ def gen_db(
             return Text("")
 
     with Progress(*Progress.get_default_columns(), CompletedColumn(), disable=False) as prog:
-        if full or list_only:
+        if full or headers:
             no_header = download_headers(prog, db_path=db_path, dry_run=dry_run)
             if no_header:
                 for entry_id in no_header:
                     log.info(f"entry {entry_id} failed.")
 
-        if full or database_only:
+        if full or database:
             generate_db_summary(prog=prog, db_path=db_path, log=log, dry_run=dry_run)
 
-        if full or maps_only or projections_only:
+        if full or maps or projections:
             to_download, to_extract, to_project = get_entries_to_process(
                 prog=prog,
                 db_path=db_path,
@@ -129,31 +143,45 @@ def gen_db(
                 overwrite=overwrite,
             )
 
-        if full or maps_only:
-            failed = download_maps(
-                prog=prog, db_path=db_path, to_download=to_download, dry_run=dry_run
+        if full or maps:
+            failed = []
+            fetched = fetch_maps(
+                prog=prog,
+                db_path=db_path,
+                to_download=to_download,
+                to_extract=to_extract,
+                dry_run=dry_run,
+                threads=threads,
+                failed=failed,
             )
+            if full or projections:
+                # project previously extracted maps first, then the downloaded ones as they arrive
+                extracted = {gz.with_suffix("") for gz in to_extract}
+                to_project_ordered = chain((m for m in to_project if m not in extracted), fetched)
+                project_maps(
+                    prog=prog,
+                    maps=to_project_ordered,
+                    log=log,
+                    dry_run=dry_run,
+                    threads=threads,
+                    keep_maps=keep_maps,
+                    total=len(to_project),
+                )
+            else:
+                for _ in fetched:
+                    pass
 
             if failed:
-                extract_remove = []
-                project_remove = []
                 log.warning("some headers are outdated, updating database")
                 for entry_id in failed:
                     log.info(f"deleting missing entry: {entry_id}")
                     header = db_path / f"emd-{entry_id:04}-v30.xml"
-                    gz_path = db_path / f"emd_{entry_id:04}.map.gz"
                     map_path = db_path / f"emd_{entry_id:04}.map"
                     proj_path = db_path / f"{entry_id:04}.pt"
 
                     header.unlink(missing_ok=True)
                     map_path.unlink(missing_ok=True)
                     proj_path.unlink(missing_ok=True)
-
-                    extract_remove.append(gz_path)
-                    project_remove.append(map_path)
-
-                to_extract = [p for p in to_extract if p not in extract_remove]
-                to_project = [p for p in to_project if p not in project_remove]
 
                 db = pd.read_csv(
                     db_path / "database_summary.csv", sep="\t", index_col=0
@@ -167,18 +195,15 @@ def gen_db(
                     na_rep="NaN",
                 )
 
-            extract_maps(
-                prog=prog, db_path=db_path, to_extract=to_extract, dry_run=dry_run
-            )
-
-        if full or projections_only:
+        elif projections:
             project_maps(
                 prog=prog,
-                db_path=db_path,
-                to_project=to_project,
+                maps=to_project,
                 log=log,
                 dry_run=dry_run,
                 threads=threads,
+                keep_maps=keep_maps,
+                total=len(to_project),
             )
 
 
