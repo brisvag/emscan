@@ -565,7 +565,6 @@ def view_entries(ctx, entries, class_image):
         layer.name_overlay.visible = True
 
     v.canvas.grid.enabled = True
-    v.canvas.grid.stride = -1
     v.reset_view()
     napari.run()
 
