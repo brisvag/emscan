@@ -31,7 +31,6 @@ dependencies = [
     "napari[all]>=0.10.0",
     "numpy",
     "pandas",
-    "plotly",
     "pydantic",
     "rich",
     "scipy",

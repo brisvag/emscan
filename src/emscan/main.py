@@ -367,7 +367,6 @@ def show(
     import napari
     import numpy as np
     import pandas as pd
-    import plotly.express as px
     import torch
     from rich import print
 
@@ -422,9 +421,6 @@ def show(
     df_angles["best"] = df_angles.reindex(selected, axis=1).to_numpy()[
         np.arange(len(df_angles)), idx
     ]
-
-    fig = px.histogram(df_selected, x=df_selected.columns, nbins=50)
-    fig.show()
 
     df_top = pd.DataFrame()
     df_top.index.name = "rank"
