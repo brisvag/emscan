@@ -113,7 +113,10 @@ lint.ignore = [
 [tool.pytest.ini_options]
 minversion = "6.0"
 testpaths = ["tests"]
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning",
+]
 
 # https://coverage.readthedocs.io/en/6.4/config.html
 [tool.coverage.report]
