@@ -26,7 +26,6 @@ dynamic = ["version"]
 dependencies = [
     "PyOpenGL-accelerate",
     "click",
-    "healpy",
     "morphosamplers>=0.0.13",
     "mrcfile",
     "napari[all]>=0.10.0",

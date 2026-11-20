@@ -10,7 +10,6 @@ from math import ceil, floor
 from operator import mul
 from pathlib import Path
 
-import healpy
 import mrcfile
 import numpy as np
 import pandas as pd
@@ -27,7 +26,6 @@ from torchvision.transforms import InterpolationMode
 from torchvision.transforms.functional import rotate
 
 BIN_RESOLUTION = 4
-HEALPIX_ORDER = 2
 GOLDEN_RATIO = (1 + np.sqrt(5)) / 2
 
 
@@ -122,16 +120,6 @@ def coerce_ndim(img, ndim):
     while img.ndim < ndim:
         img = img[None]
     return img
-
-
-@lru_cache
-def _rotations_hemisphere_healpix():
-    nside = healpy.order2nside(HEALPIX_ORDER)
-    npix = healpy.nside2npix(nside)
-    # only half the views are needed, cause projection symmetry
-    angles = healpy.pix2ang(nside, np.arange(npix // 2))
-    angles = np.stack(angles).T
-    return Rotation.from_euler("xz", angles)
 
 
 @lru_cache
